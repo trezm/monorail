@@ -1,0 +1,58 @@
+load("@crates//:defs.bzl", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library", "rust_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# crate_universe reads this to resolve third-party dependencies.
+exports_files(["Cargo.toml"])
+
+# The target name (not `crate_name`) is what rules_rust exposes as
+# CARGO_PKG_NAME, so it matches the Cargo package name to keep `env!` output
+# identical under both build systems. Same reason `version` is set explicitly:
+# rules_rust defaults CARGO_PKG_VERSION to "0.0.0".
+rust_library(
+    name = "monorail-api",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = ["src/main.rs"],
+    ),
+    crate_name = "monorail_api",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True),
+)
+
+rust_binary(
+    name = "api",
+    srcs = ["src/main.rs"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + [":monorail-api"],
+)
+
+# `crate = ":monorail-api"` compiles the library again with `--test`, which is
+# how the `#[cfg(test)]` modules inside src/ get run.
+rust_test(
+    name = "unit_tests",
+    size = "small",
+    crate = ":monorail-api",
+    proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    deps = all_crate_deps(normal_dev = True),
+)
+
+rust_test(
+    name = "integration_tests",
+    size = "small",
+    srcs = ["tests/api.rs"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(
+        proc_macro = True,
+        proc_macro_dev = True,
+    ),
+    deps = [":monorail-api"] + all_crate_deps(
+        normal = True,
+        normal_dev = True,
+    ),
+)

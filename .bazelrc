@@ -1,0 +1,65 @@
+# =============================================================================
+# Shared caches
+# =============================================================================
+# Every git worktree is a separate directory, so Bazel treats each as its own
+# workspace with its own output base. Without shared caches, N worktrees means
+# compiling and storing the entire Rust dependency graph N times — the same
+# problem as N copies of Cargo's target/.
+#
+# These caches live outside every worktree, so the second worktree to build a
+# given target gets a cache hit instead of a rebuild.
+
+# Content-addressable cache of action outputs: rlibs, binaries, test logs.
+# This is the one that makes worktrees cheap.
+build --disk_cache=~/.cache/bazel/monorail/disk
+
+# Downloaded archives: rustc toolchains, crate tarballs. Shared by default, but
+# pinned here so it sits next to the disk cache and is pruned with it.
+common --repository_cache=~/.cache/bazel/monorail/repo
+
+# Bound the disk cache so it cannot grow without limit. Bazel garbage-collects
+# it after the server has been idle for the delay below.
+common --experimental_disk_cache_gc_max_size=25G
+common --experimental_disk_cache_gc_idle_delay=5m
+
+# Cache hits across worktrees require identical action keys. A non-hermetic
+# action environment leaks per-shell values (PATH and friends) into those keys
+# and silently destroys the sharing above. Default is already true on Bazel 9;
+# pinned because it is load-bearing here.
+build --incompatible_strict_action_env
+
+# =============================================================================
+# Build behaviour
+# =============================================================================
+common --enable_platform_specific_config
+
+# Show why a target failed without re-running with extra flags.
+build --verbose_failures
+
+# Fail on unused/incorrect dependency declarations rather than warning.
+build --nolegacy_external_runfiles
+
+# =============================================================================
+# Tests
+# =============================================================================
+test --test_output=errors
+test --test_summary=terse
+
+# Rust test binaries print captured output only on failure; keep that behaviour
+# but show it when a test is run explicitly.
+test:verbose --test_output=all
+test:verbose --test_arg=--nocapture
+
+# =============================================================================
+# Release
+# =============================================================================
+build:release --compilation_mode=opt
+build:release --strip=always
+build:release --@rules_rust//rust/settings:extra_rustc_flags=-Ccodegen-units=1
+
+# =============================================================================
+# Local overrides
+# =============================================================================
+# Machine-specific settings (a different cache location, a remote cache, more
+# jobs) go in .bazelrc.user, which is gitignored.
+try-import %workspace%/.bazelrc.user

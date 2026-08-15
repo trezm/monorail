@@ -1,0 +1,32 @@
+load("@rules_rust//rust:defs.bzl", "rust_clippy", "rustfmt_test")
+
+package(default_visibility = ["//visibility:public"])
+
+# crate_universe resolves third-party crates from these.
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+])
+
+# `bazel build //:clippy` lints every Rust target in the repo.
+rust_clippy(
+    name = "clippy",
+    testonly = True,
+    deps = [
+        "//api:api",
+        "//api:integration_tests",
+        "//api:monorail-api",
+        "//api:unit_tests",
+    ],
+)
+
+# `bazel test //:rustfmt` fails on unformatted code; `bazel run
+# @rules_rust//tools/rustfmt` rewrites it.
+rustfmt_test(
+    name = "rustfmt",
+    size = "small",
+    targets = [
+        "//api:api",
+        "//api:monorail-api",
+    ],
+)
