@@ -5,13 +5,13 @@
 //! binding a port.
 
 pub mod config;
+pub mod constants;
 pub mod error;
 pub mod extract;
 pub mod routes;
 pub mod shutdown;
 pub mod state;
 pub mod telemetry;
-pub mod widget;
 
 use std::{iter::once, net::SocketAddr, time::Duration};
 

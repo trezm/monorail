@@ -74,15 +74,54 @@ Machine-specific settings (a bigger cache, a remote cache, `--jobs`) go in
 ## IDE setup
 
 rust-analyzer can read the build graph straight from Bazel, which avoids a
-`target/` directory entirely:
+`target/` directory entirely. Two ways to wire it up.
+
+### Emacs (eglot)
+
+Preferred: rust-analyzer asks Bazel for the crate graph on demand via
+`workspace.discoverConfig`, calling [`scripts/discover-rust-project.sh`](scripts/discover-rust-project.sh).
+Nothing is written to disk, so there is no `rust-project.json` to regenerate or
+let go stale.
+
+```elisp
+(defun monorail/rust-analyzer-init-options (server)
+  "Enable Bazel project discovery for SERVER when the repo supports it."
+  (let* ((root (project-root (eglot--project server)))
+         (script (expand-file-name "scripts/discover-rust-project.sh" root)))
+    (when (and (file-exists-p (expand-file-name "MODULE.bazel" root))
+               (file-executable-p script))
+      `(:workspace
+        (:discoverConfig
+         (:command [,script "{arg}"]
+                   :progressLabel "bazel"
+                   :filesToWatch ["BUILD.bazel" "MODULE.bazel"]))))))
+
+(add-to-list 'eglot-server-programs
+             '(rust-mode . ("rust-analyzer"
+                            :initializationOptions
+                            monorail/rust-analyzer-init-options)))
+(add-hook 'rust-mode-hook 'eglot-ensure)
+```
+
+This has to go in `initializationOptions`: rust-analyzer reads
+`workspace.discoverConfig` only at initialize and silently ignores it if it
+arrives later via `didChangeConfiguration`, so `.dir-locals.el` and
+`eglot-workspace-configuration` do not work for this setting.
+
+The guard means plain Cargo checkouts get `nil` — which serialises to `{}` — so
+their behaviour is unchanged and the same config is safe everywhere.
+
+### Everything else
+
+Generate the file once and point the editor at it:
 
 ```bash
 bazel run @rules_rust//tools/rust_analyzer:gen_rust_project
 ```
 
-Then point your editor at the generated `rust-project.json` — in VS Code,
-`"rust-analyzer.linkedProjects": ["rust-project.json"]`. Re-run it after adding
-a crate or changing dependencies.
+In VS Code, `"rust-analyzer.linkedProjects": ["rust-project.json"]`. Re-run
+after adding a crate or changing dependencies — unlike the discover path, this
+file does go stale.
 
 ## Cargo
 

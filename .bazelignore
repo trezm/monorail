@@ -1,7 +1,2 @@
-# Nested git worktrees live here. Bazel must not descend into them: each is a
-# full copy of the repo, so globbing them would duplicate every target and make
-# the outer build depend on unrelated branches.
 .claude/worktrees
-
-# Cargo output, when the cargo escape hatch is used without a shared target dir.
 target

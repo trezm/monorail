@@ -12,9 +12,7 @@ publish = false
 [workspace.dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["macros"] }
-chrono = { version = "0.4.45", default-features = false, features = ["clock", "serde", "std"] }
 dotenvy = "0.15.7"
-http = "1.5.0"
 http-body-util = "0.1.5"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
@@ -34,7 +32,6 @@ tower-http = { version = "0.7.0", features = [
 ] }
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
-uuid = { version = "1.24.1", features = ["serde", "v4"] }
 
 [profile.release]
 # Slower builds, meaningfully faster and smaller binaries for deployed services.

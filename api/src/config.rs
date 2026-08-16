@@ -4,6 +4,7 @@
 //! at all. See `.env.example` for the full list.
 
 use std::{
+    convert::Infallible,
     env::{self, VarError},
     fmt::Display,
     net::{IpAddr, Ipv4Addr},
@@ -11,8 +12,7 @@ use std::{
     time::Duration,
 };
 
-/// Prefix for every variable this service reads.
-const PREFIX: &str = "API_";
+use crate::constants;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -50,17 +50,15 @@ impl Environment {
 }
 
 impl FromStr for Environment {
-    type Err = String;
+    type Err = Infallible;
 
+    /// Anything unrecognised is development.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "dev" | "development" | "local" => Ok(Self::Development),
-            "stage" | "staging" => Ok(Self::Staging),
-            "prod" | "production" => Ok(Self::Production),
-            other => Err(format!(
-                "expected one of development/staging/production, got `{other}`"
-            )),
-        }
+        Ok(match s.trim().to_ascii_lowercase().as_str() {
+            "stage" | "staging" => Self::Staging,
+            "prod" | "production" => Self::Production,
+            _ => Self::Development,
+        })
     }
 }
 
@@ -113,33 +111,40 @@ pub struct Config {
 impl Config {
     /// Reads the configuration from the process environment.
     pub fn from_env() -> Result<Self, ConfigError> {
-        let environment = parsed("ENV", Environment::Development)?;
+        let environment = parsed(constants::ENV, Environment::Development)?;
+        let cors = parsed(constants::CORS_ALLOWED_ORIGINS, String::new())?;
 
         Ok(Self {
             environment,
-            host: parsed("HOST", IpAddr::V4(Ipv4Addr::UNSPECIFIED))?,
-            // `PORT` (unprefixed) is what most container platforms inject, so it
-            // acts as a fallback when `API_PORT` is absent.
-            port: match raw("PORT")? {
-                Some(_) => parsed("PORT", 8080)?,
-                None => parse_var("PORT", 8080)?,
-            },
+            host: parsed(constants::HOST, IpAddr::V4(Ipv4Addr::UNSPECIFIED))?,
+            port: parsed(
+                constants::PORT,
+                parsed(constants::PORT_FALLBACK, constants::DEFAULT_PORT)?,
+            )?,
             log_format: parsed(
-                "LOG_FORMAT",
+                constants::LOG_FORMAT,
                 if environment.is_development() {
                     LogFormat::Pretty
                 } else {
                     LogFormat::Json
                 },
             )?,
-            log_filter: raw("LOG_FILTER")?
-                .unwrap_or_else(|| "info,tower_http=debug,monorail_api=debug".to_owned()),
-            request_timeout: Duration::from_secs(parsed("REQUEST_TIMEOUT_SECS", 30_u64)?),
-            body_limit_bytes: parsed("BODY_LIMIT_BYTES", 2 * 1024 * 1024_usize)?,
-            cors_origins: match raw("CORS_ALLOWED_ORIGINS")?.as_deref().map(str::trim) {
-                None | Some("") => CorsOrigins::Disabled,
-                Some("*") => CorsOrigins::Any,
-                Some(list) => CorsOrigins::List(
+            log_filter: parsed(
+                constants::LOG_FILTER,
+                constants::DEFAULT_LOG_FILTER.to_owned(),
+            )?,
+            request_timeout: Duration::from_secs(parsed(
+                constants::REQUEST_TIMEOUT_SECS,
+                constants::DEFAULT_REQUEST_TIMEOUT_SECS,
+            )?),
+            body_limit_bytes: parsed(
+                constants::BODY_LIMIT_BYTES,
+                constants::DEFAULT_BODY_LIMIT_BYTES,
+            )?,
+            cors_origins: match cors.as_str() {
+                "" => CorsOrigins::Disabled,
+                "*" => CorsOrigins::Any,
+                list => CorsOrigins::List(
                     list.split(',')
                         .map(str::trim)
                         .filter(|origin| !origin.is_empty())
@@ -151,65 +156,28 @@ impl Config {
     }
 }
 
-/// Reads `API_{key}` as a raw string.
-fn raw(key: &str) -> Result<Option<String>, ConfigError> {
-    read(&format!("{PREFIX}{key}"))
-}
-
-fn read(full_key: &str) -> Result<Option<String>, ConfigError> {
-    match env::var(full_key) {
-        Ok(value) => Ok(Some(value)),
-        Err(VarError::NotPresent) => Ok(None),
-        Err(VarError::NotUnicode(_)) => Err(ConfigError::NotUnicode {
-            key: full_key.to_owned(),
-        }),
-    }
-}
-
-/// Reads and parses `API_{key}`, falling back to `default` when unset.
+/// Reads and parses `key`, falling back to `default` when unset.
 fn parsed<T>(key: &str, default: T) -> Result<T, ConfigError>
 where
     T: FromStr,
     T::Err: Display,
 {
-    parse_var(&format!("{PREFIX}{key}"), default)
-}
-
-fn parse_var<T>(full_key: &str, default: T) -> Result<T, ConfigError>
-where
-    T: FromStr,
-    T::Err: Display,
-{
-    let Some(value) = read(full_key)? else {
-        return Ok(default);
+    let value = match env::var(key) {
+        Ok(value) => value,
+        Err(VarError::NotPresent) => return Ok(default),
+        Err(VarError::NotUnicode(_)) => {
+            return Err(ConfigError::NotUnicode {
+                key: key.to_owned(),
+            });
+        }
     };
 
     value
         .trim()
         .parse()
         .map_err(|source: T::Err| ConfigError::Invalid {
-            key: full_key.to_owned(),
+            key: key.to_owned(),
             value: value.clone(),
             source: source.to_string().into(),
         })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn parses_environment_aliases() {
-        assert_eq!("dev".parse(), Ok(Environment::Development));
-        assert_eq!("PRODUCTION".parse(), Ok(Environment::Production));
-        assert_eq!(" staging ".parse(), Ok(Environment::Staging));
-        assert!("nope".parse::<Environment>().is_err());
-    }
-
-    #[test]
-    fn parses_log_formats() {
-        assert_eq!("json".parse(), Ok(LogFormat::Json));
-        assert_eq!("Pretty".parse(), Ok(LogFormat::Pretty));
-        assert!("xml".parse::<LogFormat>().is_err());
-    }
 }

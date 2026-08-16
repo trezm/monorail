@@ -8,7 +8,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{config::Config, widget::WidgetStore};
+use crate::config::Config;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
@@ -18,7 +18,6 @@ pub struct AppState {
 #[derive(Debug)]
 struct Inner {
     config: Config,
-    widgets: WidgetStore,
     started_at: Instant,
 }
 
@@ -28,7 +27,6 @@ impl AppState {
         Self {
             inner: Arc::new(Inner {
                 config,
-                widgets: WidgetStore::new(),
                 started_at: Instant::now(),
             }),
         }
@@ -37,11 +35,6 @@ impl AppState {
     #[must_use]
     pub fn config(&self) -> &Config {
         &self.inner.config
-    }
-
-    #[must_use]
-    pub fn widgets(&self) -> &WidgetStore {
-        &self.inner.widgets
     }
 
     #[must_use]
