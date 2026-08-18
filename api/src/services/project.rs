@@ -1,10 +1,10 @@
 //! Project lifecycle management.
 //!
-//! A project is the container's owner: it groups related containers and is what
-//! a backend bills and scopes access against. [`ProjectManager`] is the CRUD
+//! A project is the service's owner: it groups related services and is what a
+//! backend bills and scopes access against. [`ProjectManager`] is the CRUD
 //! surface over that grouping, kept separate from
-//! [`ContainerManager`](crate::services::container::ContainerManager) so a
-//! backend can implement one without the other.
+//! [`ServiceManager`](crate::services::service::ServiceManager) so a backend
+//! can implement one without the other.
 
 use std::fmt;
 
@@ -50,9 +50,9 @@ pub struct Project {
 /// What can go wrong while managing a project.
 ///
 /// Independent of [`ApiError`] for the same reason as
-/// [`ContainerManagerError`](crate::services::container::ContainerManagerError):
-/// the trait stays usable from non-HTTP callers, and one `From` impl decides
-/// how each case surfaces to a client.
+/// [`ServiceManagerError`](crate::services::service::ServiceManagerError): the
+/// trait stays usable from non-HTTP callers, and one `From` impl decides how
+/// each case surfaces to a client.
 #[derive(Debug, thiserror::Error)]
 pub enum ProjectManagerError {
     /// The requested name is empty, too long, or otherwise unusable.
