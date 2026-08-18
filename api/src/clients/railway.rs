@@ -1,10 +1,11 @@
 //! Railway (<https://railway.com>) as a container backend.
 //!
 //! Railway deploys a service straight from a GitHub repository, which lines up
-//! with what [`ContainerManager`] asks for. The client is a stub: it holds no
-//! state and every method is unimplemented.
 
-use crate::services::container::{ContainerId, ContainerManager, ContainerResult};
+use crate::services::{
+    container::{ContainerId, ContainerManager, ContainerResult},
+    project::{Project, ProjectId, ProjectManager, ProjectResult},
+};
 
 /// Talks to the Railway API on our behalf.
 ///
@@ -29,5 +30,24 @@ impl ContainerManager for Railway {
 
     async fn destroy_container(&self, _container_id: &ContainerId) -> ContainerResult<ContainerId> {
         todo!("delete the Railway service")
+    }
+}
+
+#[async_trait::async_trait]
+impl ProjectManager for Railway {
+    async fn list_projects(&self) -> ProjectResult<Vec<Project>> {
+        todo!("list the caller's Railway projects")
+    }
+
+    async fn create_project(&self, _name: &str) -> ProjectResult<Project> {
+        todo!("create a Railway project")
+    }
+
+    async fn update_project(&self, _project_id: &ProjectId, _name: &str) -> ProjectResult<Project> {
+        todo!("rename a Railway project")
+    }
+
+    async fn delete_project(&self, _project_id: &ProjectId) -> ProjectResult<ProjectId> {
+        todo!("delete a Railway project")
     }
 }
