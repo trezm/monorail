@@ -1,9 +1,6 @@
 //! Railway (<https://railway.com>) as a container backend.
 //!
 //! Railway deploys a service straight from a GitHub repository, which lines up
-//! with what [`ContainerManager`] asks for, and groups those deployments into
-//! projects, which is what [`ProjectManager`] asks for. The client is a stub:
-//! it holds no state and every method is unimplemented.
 
 use crate::services::{
     container::{ContainerId, ContainerManager, ContainerResult},
