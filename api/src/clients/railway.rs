@@ -1,10 +1,13 @@
-//! Railway (<https://railway.com>) as a container backend.
+//! Railway (<https://railway.com>) as a service backend.
 //!
 //! Railway deploys a service straight from a GitHub repository, which lines up
+//! with what [`ServiceManager`] asks for, and groups those deployments into
+//! projects, which is what [`ProjectManager`] asks for. The client is a stub:
+//! it holds no state and every method is unimplemented.
 
 use crate::services::{
-    container::{ContainerId, ContainerManager, ContainerResult},
     project::{Project, ProjectId, ProjectManager, ProjectResult},
+    service::{ServiceId, ServiceManager, ServiceResult},
 };
 
 /// Talks to the Railway API on our behalf.
@@ -23,12 +26,12 @@ impl Railway {
 }
 
 #[async_trait::async_trait]
-impl ContainerManager for Railway {
-    async fn create_container(&self, _github_url: &str) -> ContainerResult<ContainerId> {
+impl ServiceManager for Railway {
+    async fn create_service(&self, _github_url: &str) -> ServiceResult<ServiceId> {
         todo!("deploy the repository as a Railway service")
     }
 
-    async fn destroy_container(&self, _container_id: &ContainerId) -> ContainerResult<ContainerId> {
+    async fn destroy_service(&self, _service_id: &ServiceId) -> ServiceResult<ServiceId> {
         todo!("delete the Railway service")
     }
 }
