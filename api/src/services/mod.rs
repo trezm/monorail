@@ -3,5 +3,6 @@
 //! Each module owns one capability and exposes it as a trait, so handlers
 //! depend on the behaviour rather than on a concrete backend.
 
+pub mod auth;
 pub mod project;
 pub mod service;
