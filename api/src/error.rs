@@ -38,6 +38,13 @@ pub enum ApiError {
     #[error("insufficient permissions")]
     Forbidden,
 
+    /// A dependency the request needs is down — the database, a cache, an
+    /// upstream service. Distinct from [`Self::Internal`] because it says the
+    /// request is worth retrying and nothing about it was wrong. The source is
+    /// logged, never returned.
+    #[error("a required dependency is unavailable")]
+    Unavailable(#[source] anyhow::Error),
+
     /// Anything unexpected. The message is logged, never returned.
     #[error(transparent)]
     Internal(#[from] anyhow::Error),
@@ -58,6 +65,7 @@ impl ApiError {
             Self::Conflict(_) => StatusCode::CONFLICT,
             Self::Unauthorized => StatusCode::UNAUTHORIZED,
             Self::Forbidden => StatusCode::FORBIDDEN,
+            Self::Unavailable(_) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Internal(_) => StatusCode::INTERNAL_SERVER_ERROR,
         }
     }
@@ -73,6 +81,7 @@ impl ApiError {
             Self::Conflict(_) => "conflict",
             Self::Unauthorized => "unauthorized",
             Self::Forbidden => "forbidden",
+            Self::Unavailable(_) => "service_unavailable",
             Self::Internal(_) => "internal_error",
         }
     }
@@ -100,6 +109,12 @@ impl IntoResponse for ApiError {
             Self::Internal(source) => {
                 tracing::error!(error = ?source, "request failed with an unhandled error");
                 "an internal error occurred".to_owned()
+            }
+            // Same, except the generic message is safe to return: which
+            // dependency failed is operator detail, that one did is not.
+            Self::Unavailable(source) => {
+                tracing::error!(error = ?source, "request failed: a dependency is unavailable");
+                self.to_string()
             }
             other => other.to_string(),
         };

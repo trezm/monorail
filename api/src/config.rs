@@ -6,7 +6,7 @@
 use std::{
     convert::Infallible,
     env::{self, VarError},
-    fmt::Display,
+    fmt::{self, Display},
     net::{IpAddr, Ipv4Addr},
     str::FromStr,
     time::Duration,
@@ -18,6 +18,8 @@ use crate::constants;
 pub enum ConfigError {
     #[error("{key} is not valid UTF-8")]
     NotUnicode { key: String },
+    #[error("{key} must be set outside development")]
+    Missing { key: String },
     #[error("{key}=\"{value}\" could not be parsed: {source}")]
     Invalid {
         key: String,
@@ -93,6 +95,61 @@ pub enum CorsOrigins {
     List(Vec<String>),
 }
 
+/// A Postgres connection string.
+///
+/// A newtype rather than a `String` for one reason: the password lives in it,
+/// and [`Config`] derives `Debug`. This type's `Debug` redacts, so no
+/// `?config` in a log line — or a panic message, or an error report — can spill
+/// the credential. `Display` is intentionally absent so there is no accidental
+/// unredacted path; the connection string itself comes out of [`Self::as_str`].
+#[derive(Clone, PartialEq, Eq)]
+pub struct DatabaseUrl(String);
+
+impl DatabaseUrl {
+    #[must_use]
+    pub fn new(url: impl Into<String>) -> Self {
+        Self(url.into())
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    /// `postgres://user:****@host:5432/db`. Anything that does not parse as a
+    /// URL with credentials is returned unchanged — it has no password to hide.
+    #[must_use]
+    pub fn redacted(&self) -> String {
+        let Some((scheme, rest)) = self.0.split_once("://") else {
+            return self.0.clone();
+        };
+        let Some((authority, tail)) = rest.split_once('@') else {
+            return self.0.clone();
+        };
+
+        let credentials = match authority.split_once(':') {
+            Some((user, _password)) => format!("{user}:****"),
+            None => authority.to_owned(),
+        };
+
+        format!("{scheme}://{credentials}@{tail}")
+    }
+}
+
+impl fmt::Debug for DatabaseUrl {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.redacted())
+    }
+}
+
+impl FromStr for DatabaseUrl {
+    type Err = Infallible;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(Self::new(s))
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Config {
     pub environment: Environment,
@@ -106,6 +163,19 @@ pub struct Config {
     /// Maximum accepted request body size, in bytes.
     pub body_limit_bytes: usize,
     pub cors_origins: CorsOrigins,
+    /// libpq-style connection string, e.g. `postgres://user:pw@host:5432/db`.
+    pub database_url: DatabaseUrl,
+    /// Upper bound on concurrent Postgres connections held by this process.
+    /// Postgres itself caps total connections (`max_connections`, 100 by
+    /// default), so this times the replica count has to stay under that.
+    pub database_pool_size: u32,
+    /// How long a request waits for a pooled connection before giving up. This
+    /// covers queueing behind a busy pool as well as opening a new connection.
+    pub database_connect_timeout: Duration,
+    /// Whether to apply pending migrations during startup. Convenient for the
+    /// local stack; off by default, because in a rolling deploy every replica
+    /// would race to run them.
+    pub database_migrate_on_start: bool,
 }
 
 impl Config {
@@ -152,7 +222,53 @@ impl Config {
                         .collect(),
                 ),
             },
+            database_url: database_url(environment)?,
+            database_pool_size: parsed(
+                constants::DATABASE_POOL_SIZE,
+                constants::DEFAULT_DATABASE_POOL_SIZE,
+            )?,
+            database_connect_timeout: Duration::from_secs(parsed(
+                constants::DATABASE_CONNECT_TIMEOUT_SECS,
+                constants::DEFAULT_DATABASE_CONNECT_TIMEOUT_SECS,
+            )?),
+            database_migrate_on_start: parsed(constants::DATABASE_MIGRATE_ON_START, false)?,
         })
+    }
+}
+
+/// Resolves the connection string, preferring the prefixed name.
+///
+/// Development falls back to the local `compose.yaml` database so the service
+/// still starts with no environment at all. Anywhere else an unset variable is
+/// an error: defaulting to localhost in production would turn a deployment
+/// mistake into a confusing connection refused at the first request.
+fn database_url(environment: Environment) -> Result<DatabaseUrl, ConfigError> {
+    let configured = match present(constants::DATABASE_URL)? {
+        Some(url) => Some(url),
+        None => present(constants::DATABASE_URL_FALLBACK)?,
+    };
+
+    match configured {
+        Some(url) => Ok(DatabaseUrl::new(url)),
+        None if environment.is_development() => {
+            Ok(DatabaseUrl::new(constants::DEFAULT_DATABASE_URL))
+        }
+        None => Err(ConfigError::Missing {
+            key: constants::DATABASE_URL.to_owned(),
+        }),
+    }
+}
+
+/// Reads `key`, treating unset and empty-after-trim alike. An exported-but-empty
+/// variable is what a template that did not get substituted looks like, and
+/// taking it literally is never useful.
+fn present(key: &str) -> Result<Option<String>, ConfigError> {
+    match env::var(key) {
+        Ok(value) => Ok(Some(value.trim().to_owned()).filter(|value| !value.is_empty())),
+        Err(VarError::NotPresent) => Ok(None),
+        Err(VarError::NotUnicode(_)) => Err(ConfigError::NotUnicode {
+            key: key.to_owned(),
+        }),
     }
 }
 

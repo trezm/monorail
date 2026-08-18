@@ -1,0 +1,35 @@
+# The database half of the local test stack. The API is not here: it runs on the
+# host out of Bazel, because building Rust in a container costs a full
+# non-incremental compile on every edit and Bazel's incremental build is the
+# whole point. tools/stack.sh runs both halves together.
+#
+# The project name is fixed so every git worktree shares one database. Port 5432
+# on the host can only belong to one of them anyway, and a second copy per
+# worktree is not something anyone wants.
+name: monorail
+
+services:
+  postgres:
+    image: postgres:17-alpine
+    environment:
+      POSTGRES_USER: monorail
+      POSTGRES_PASSWORD: monorail
+      POSTGRES_DB: monorail
+      # A subdirectory rather than the mount point itself: initdb insists on an
+      # empty directory, and a volume mount root is not always one.
+      PGDATA: /var/lib/postgresql/data/pgdata
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      # The database briefly accepts connections during init before it is
+      # actually ready; -h forces a real TCP check rather than the local socket.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U monorail -d monorail"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 10s
+
+volumes:
+  postgres-data:

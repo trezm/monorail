@@ -50,12 +50,14 @@ async fn live(state: axum::extract::State<AppState>) -> Json<Health> {
     })
 }
 
-/// Readiness: the process can serve *useful* traffic right now. Check the things
-/// a request would need — database pool, cache, migrations — and return an error
-/// so the load balancer stops sending traffic.
+/// Readiness: the process can serve *useful* traffic right now. Checks the
+/// things a request would need — currently just Postgres — and answers `503` so
+/// the load balancer stops sending traffic until they come back.
+///
+/// The check is a real round-trip, not a look at pool statistics: a pool that
+/// has never dialled out reports itself perfectly healthy.
 async fn ready(state: axum::extract::State<AppState>) -> ApiResult<Json<Health>> {
-    // Add dependency checks here, e.g.:
-    //     state.db().ping().await.map_err(|e| ApiError::Internal(e.into()))?;
+    state.db().ping().await?;
 
     Ok(Json(Health {
         status: "ready",

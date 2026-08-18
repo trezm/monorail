@@ -6,6 +6,7 @@
 
 pub mod config;
 pub mod constants;
+pub mod db;
 pub mod error;
 pub mod extract;
 pub mod routes;
@@ -40,6 +41,7 @@ use tower_http::{
 use tracing::{Level, Span};
 
 pub use config::Config;
+pub use db::Database;
 pub use error::{ApiError, ApiResult};
 pub use state::AppState;
 
@@ -89,9 +91,33 @@ pub fn app(state: AppState) -> Router {
 }
 
 /// Binds the listener and serves until a shutdown signal arrives.
+///
+/// Postgres is reached before the listener is bound, so a bad connection string
+/// or an unreachable database is a startup failure with a readable message
+/// rather than a process that accepts traffic and answers `503` to all of it.
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.host, config.port));
+    let migrate = config.database_migrate_on_start;
     let state = AppState::new(config);
+
+    state.db().ping().await.with_context(|| {
+        format!(
+            "database at {} is unreachable",
+            state.config().database_url.redacted()
+        )
+    })?;
+    tracing::info!(database = %state.config().database_url.redacted(), "database connected");
+
+    if migrate {
+        let applied = state.db().migrate().await?;
+
+        if applied.is_empty() {
+            tracing::info!("database schema is up to date");
+        } else {
+            tracing::info!(versions = ?applied, count = applied.len(), "applied migrations");
+        }
+    }
+
     let app = app(state);
 
     let listener = TcpListener::bind(addr)
