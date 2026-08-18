@@ -5,12 +5,13 @@
 //! opaque `500` so internal detail never reaches a client.
 
 use axum::{
-    Json,
     extract::rejection::{JsonRejection, PathRejection, QueryRejection},
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde::Serialize;
+
+use crate::extract::Json;
 
 pub type ApiResult<T> = Result<T, ApiError>;
 

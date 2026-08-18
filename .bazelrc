@@ -8,6 +8,9 @@ common --experimental_disk_cache_gc_idle_delay=5m
 # silently breaks them.
 build --incompatible_strict_action_env
 
+# Point the clippy rules at //:clippy.toml; rules_rust does not discover it.
+build --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
+
 common --enable_platform_specific_config
 build --verbose_failures
 build --nolegacy_external_runfiles

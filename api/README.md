@@ -42,7 +42,10 @@ reaches a client.
 
 **Extractors.** Use `crate::extract::{Json, Path, Query}` rather than axum's.
 They are the same extractors with `ApiError` as the rejection type, which is
-what keeps malformed input on the envelope above.
+what keeps malformed input on the envelope above. axum's own extractors reject
+with `text/plain`, so reaching for one silently drops that endpoint off the
+envelope — `//:clippy.toml` disallows them to make that a build failure instead.
+`src/extract.rs` carries the one `allow`, since wrapping them is its job.
 
 **Middleware.** Order is load-bearing and documented in `src/lib.rs`. The
 request id is assigned before the tracing span opens, so every log line for a

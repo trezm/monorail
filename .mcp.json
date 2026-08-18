@@ -1,0 +1,10 @@
+{
+  "mcpServers": {
+    "syl": {
+      "command": "node",
+      "args": [
+        "/Users/pete/dev/codedex/packages/channel/dist/server.js"
+      ]
+    }
+  }
+}

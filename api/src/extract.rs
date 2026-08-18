@@ -4,6 +4,11 @@
 //! means a malformed request produces the same JSON error envelope as a failure
 //! raised inside a handler.
 
+// The one module allowed to name axum's extractors: wrapping them is the
+// whole point of it. Everywhere else //:clippy.toml makes that a build
+// failure.
+#![allow(clippy::disallowed_types)]
+
 use axum::{
     extract::{FromRequest, FromRequestParts},
     response::{IntoResponse, Response},

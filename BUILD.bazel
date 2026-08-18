@@ -6,6 +6,7 @@ package(default_visibility = ["//visibility:public"])
 exports_files([
     "Cargo.toml",
     "Cargo.lock",
+    "clippy.toml",
 ])
 
 # `bazel build //:clippy` lints every Rust target in the repo.
