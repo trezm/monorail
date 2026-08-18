@@ -1,7 +1,7 @@
 //! Shared application state.
 //!
-//! One `Arc` wraps the whole struct, so `AppState` is cheap to clone (axum
-//! clones it per request) and adding a field does not add another allocation.
+//! `Config` sits behind an `Arc` because axum clones the state per request and
+//! it owns heap data; `Instant` is `Copy`, so it does not need to.
 
 use std::{
     sync::Arc,
@@ -12,12 +12,7 @@ use crate::config::Config;
 
 #[derive(Debug, Clone)]
 pub struct AppState {
-    inner: Arc<Inner>,
-}
-
-#[derive(Debug)]
-struct Inner {
-    config: Config,
+    config: Arc<Config>,
     started_at: Instant,
 }
 
@@ -25,20 +20,18 @@ impl AppState {
     #[must_use]
     pub fn new(config: Config) -> Self {
         Self {
-            inner: Arc::new(Inner {
-                config,
-                started_at: Instant::now(),
-            }),
+            config: Arc::new(config),
+            started_at: Instant::now(),
         }
     }
 
     #[must_use]
     pub fn config(&self) -> &Config {
-        &self.inner.config
+        &self.config
     }
 
     #[must_use]
     pub fn uptime(&self) -> Duration {
-        self.inner.started_at.elapsed()
+        self.started_at.elapsed()
     }
 }
