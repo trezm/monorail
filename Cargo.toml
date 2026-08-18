@@ -14,7 +14,23 @@ anyhow = "1.0.104"
 async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["macros"] }
 dotenvy = "0.15.7"
+# GraphQL *client* only — we consume Railway's API, we do not serve one.
+# Its "reqwest" feature is deliberately off: that helper pins reqwest 0.11,
+# which would drag a second HTTP stack and native-tls/OpenSSL into the tree.
+# The derive and Response types are transport-agnostic, so we POST with our
+# own reqwest 0.12 client instead.
+graphql_client = { version = "0.14.0", default-features = false, features = [
+    "graphql_query_derive",
+] }
 http-body-util = "0.1.5"
+# rustls rather than the default native-tls: no OpenSSL for the Bazel
+# sandbox to find, and one TLS stack across every platform we build on.
+reqwest = { version = "0.12.28", default-features = false, features = [
+    "charset",
+    "http2",
+    "json",
+    "rustls-tls",
+] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.151"
 thiserror = "2.0.20"
