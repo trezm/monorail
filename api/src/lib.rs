@@ -4,6 +4,7 @@
 //! build the real application with [`app`] and drive it in-process, without
 //! binding a port.
 
+pub mod clients;
 pub mod config;
 pub mod constants;
 pub mod error;
