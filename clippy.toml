@@ -1,0 +1,10 @@
+# Pre-handler extractor rejections are plain text, so an endpoint using axum's
+# extractors silently drops off the JSON error envelope that every other
+# failure uses. crate::extract wraps them to reject with ApiError instead;
+# these entries make forgetting that a build failure rather than a surprise in
+# production. api/src/extract.rs is the one place allowed to name them.
+disallowed-types = [
+    { path = "axum::Json", reason = "use crate::extract::Json" },
+    { path = "axum::extract::Query", reason = "use crate::extract::Query" },
+    { path = "axum::extract::Path", reason = "use crate::extract::Path" },
+]

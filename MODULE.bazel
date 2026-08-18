@@ -1,0 +1,39 @@
+"""monorail — Bazel module definition (bzlmod)."""
+
+module(
+    name = "monorail",
+    version = "0.0.0",
+)
+
+RUST_EDITION = "2024"
+
+# Keep in sync with //rust-toolchain.toml, which drives the Cargo/rust-analyzer
+# path. Bazel does not read rust-toolchain.toml.
+RUST_VERSION = "1.95.0"
+
+bazel_dep(name = "rules_rust", version = "0.73.0")
+
+rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
+rust.toolchain(
+    edition = RUST_EDITION,
+    versions = [RUST_VERSION],
+)
+use_repo(rust, "rust_toolchains")
+
+register_toolchains("@rust_toolchains//:all")
+
+# Third-party crates are resolved from the Cargo manifests, so Cargo.toml stays
+# the single source of truth for dependencies and `cargo` keeps working for
+# rust-analyzer. After changing any dependency, re-pin with:
+#
+#     CARGO_BAZEL_REPIN=1 bazel mod deps
+#
+crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
+crate.from_cargo(
+    name = "crates",
+    cargo_lockfile = "//:Cargo.lock",
+    # Only the Cargo *workspace* root is listed; it already pulls in every
+    # member manifest. Listing members as well makes Bazel warn.
+    manifests = ["//:Cargo.toml"],
+)
+use_repo(crate, "crates")

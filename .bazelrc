@@ -1,0 +1,28 @@
+# Shared across worktrees so each does not rebuild and restore the world.
+build --disk_cache=~/.cache/bazel/monorail/disk
+common --repository_cache=~/.cache/bazel/monorail/repo
+common --experimental_disk_cache_gc_max_size=25G
+common --experimental_disk_cache_gc_idle_delay=5m
+
+# Cross-worktree cache hits need identical action keys; a leaky action env
+# silently breaks them.
+build --incompatible_strict_action_env
+
+# Point the clippy rules at //:clippy.toml; rules_rust does not discover it.
+build --@rules_rust//rust/settings:clippy.toml=//:clippy.toml
+
+common --enable_platform_specific_config
+build --verbose_failures
+build --nolegacy_external_runfiles
+
+test --test_output=errors
+test --test_summary=terse
+
+test:verbose --test_output=all
+test:verbose --test_arg=--nocapture
+
+build:release --compilation_mode=opt
+build:release --strip=always
+build:release --@rules_rust//rust/settings:extra_rustc_flags=-Ccodegen-units=1
+
+try-import %workspace%/.bazelrc.user

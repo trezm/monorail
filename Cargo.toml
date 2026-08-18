@@ -1,0 +1,40 @@
+[workspace]
+resolver = "3"
+members = ["api"]
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.95"
+publish = false
+
+# Shared dependency versions for every Rust crate in the monorepo. Members opt in
+# with `dep.workspace = true` so upgrades happen in exactly one place.
+[workspace.dependencies]
+anyhow = "1.0.104"
+axum = { version = "0.8.9", features = ["macros"] }
+dotenvy = "0.15.7"
+http-body-util = "0.1.5"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+thiserror = "2.0.20"
+tokio = { version = "1.53.1", features = ["macros", "net", "rt-multi-thread", "signal", "time"] }
+tower = { version = "0.5.3", features = ["util"] }
+tower-http = { version = "0.7.0", features = [
+    "catch-panic",
+    "compression-full",
+    "cors",
+    "limit",
+    "request-id",
+    "sensitive-headers",
+    "timeout",
+    "trace",
+    "util",
+] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter", "fmt", "json"] }
+
+[profile.release]
+# Slower builds, meaningfully faster and smaller binaries for deployed services.
+codegen-units = 1
+lto = "thin"
+strip = "debuginfo"
