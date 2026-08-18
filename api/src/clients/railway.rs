@@ -5,7 +5,8 @@
 //! projects, which is what [`ProjectManager`] asks for.
 //!
 //! Railway's public API is GraphQL, so this holds the HTTP client that will
-//! carry those queries. The trait methods are still unimplemented.
+//! carry those queries, and the endpoint it sends them to. The trait methods
+//! are still unimplemented.
 
 use std::time::Duration;
 
@@ -13,9 +14,6 @@ use crate::services::{
     project::{Project, ProjectId, ProjectManager, ProjectResult},
     service::{ServiceId, ServiceManager, ServiceResult},
 };
-
-/// Railway's GraphQL API endpoint.
-const ENDPOINT: &str = "https://backboard.railway.com/graphql/v2";
 
 /// How long a single Railway request may take before we give up on it.
 ///
@@ -34,23 +32,19 @@ pub struct Railway {
 }
 
 impl Railway {
+    /// `endpoint` comes from [`Config::railway_endpoint`](crate::config::Config),
+    /// which defaults to Railway's public API and is overridable with
+    /// `API_RAILWAY_ENDPOINT` for a self-hosted install or a test stub.
+    ///
     /// # Errors
     ///
     /// Fails if the TLS backend cannot be initialised, which in practice means
     /// a broken build rather than anything recoverable at runtime.
-    pub fn new() -> reqwest::Result<Self> {
+    pub fn new(endpoint: impl Into<String>) -> reqwest::Result<Self> {
         Ok(Self {
             http: reqwest::Client::builder().timeout(TIMEOUT).build()?,
-            endpoint: ENDPOINT.to_owned(),
+            endpoint: endpoint.into(),
         })
-    }
-
-    /// Points the client at a different endpoint, for tests and self-hosted
-    /// Railway installs.
-    #[must_use]
-    pub fn with_endpoint(mut self, endpoint: impl Into<String>) -> Self {
-        self.endpoint = endpoint.into();
-        self
     }
 
     #[must_use]
