@@ -11,6 +11,7 @@ publish = false
 # with `dep.workspace = true` so upgrades happen in exactly one place.
 [workspace.dependencies]
 anyhow = "1.0.104"
+async-trait = "0.1.89"
 axum = { version = "0.8.9", features = ["macros"] }
 dotenvy = "0.15.7"
 http-body-util = "0.1.5"
