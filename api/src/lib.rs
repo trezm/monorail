@@ -9,6 +9,7 @@ pub mod constants;
 pub mod error;
 pub mod extract;
 pub mod routes;
+pub mod services;
 pub mod shutdown;
 pub mod state;
 pub mod telemetry;
