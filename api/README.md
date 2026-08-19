@@ -25,7 +25,7 @@ The service requires Postgres and refuses to start without it. See
 | `src/telemetry.rs` | Tracing subscriber setup. |
 | `src/shutdown.rs` | SIGINT/SIGTERM handling. |
 | `src/bin/migrate.rs` | Applies pending migrations and exits. |
-| `src/secret.rs` | A string that must not reach a log line. |
+| `src/secret.rs` | A wrapper that keeps a string out of logs. |
 | `src/routes/` | HTTP handlers, one module per resource. |
 | `src/services/` | Business logic, one trait per capability. |
 | `migrations/` | Schema history, embedded into the binary. |
@@ -127,28 +127,35 @@ so this wants to be one job per deploy.
 
 ## Authentication
 
-Users log in with Railway, which is an OAuth 2.0 and OpenID Connect provider.
-[`src/services/auth.rs`](src/services/auth.rs) owns the protocol:
-`AuthProvider` is the capability, `RailwayAuth` the implementation. Every
-endpoint is derived from the configured issuer, so a test points it at a local
-server instead of the network.
+Users log in through Railway, which acts as an OAuth 2.0 and OpenID Connect
+provider. [`src/services/auth.rs`](src/services/auth.rs) implements the flow:
+`AuthProvider` is the trait that describes the capability, and `RailwayAuth`
+is the implementation.
 
-Authorization code with PKCE, `S256` — the only challenge method Railway
-advertises. The ID token's signature is not checked and there is no JWKS
-client: the token set arrives over TLS from a direct, client-authenticated call
-to the token endpoint rather than through the browser, which OpenID Connect
-Core §3.1.3.7 exempts. Identity comes from the userinfo endpoint, so nothing
-depends on parsing the JWT.
+**The flow.** The service uses the authorization code flow with PKCE. It sends
+the `S256` challenge method, because that is the only method Railway supports.
+It builds every Railway endpoint from the issuer URL in the configuration, so a
+test can point the issuer at a local server and run the whole flow without
+reaching the network.
 
-`AppState::auth()` is `Option`: with no OAuth app configured the service still
-starts and the login routes answer `503`. Configuring some but not all of the
-client id, secret and redirect URI is a startup error instead — that shape is a
-deployment mistake, and left alone it fails as a redirect loop rather than a
-readable message.
+**ID token signatures.** The service does not verify the ID token's signature,
+and it ships no JWKS client. Two things make that safe. First, the token set
+never passes through the browser: the service fetches it over TLS in a direct
+call to the token endpoint and authenticates itself in that call, which OpenID
+Connect Core §3.1.3.7 exempts from the signature check. Second, the service
+reads the user's identity from the userinfo endpoint, so no code parses the
+JWT.
 
-Tokens and the `state` value are wrapped in [`Secret`](src/secret.rs) or a
-redacting `Debug`, so `?config`, a panic message or an error report cannot spill
-one.
+**Partial configuration.** `AppState::auth()` returns an `Option`. If you
+configure no OAuth app at all, the service still starts and the login routes
+return `503`. If you configure some of the client ID, client secret and
+redirect URI but not all three, the service fails at startup instead. That
+combination is a deployment mistake, and starting anyway would surface it as a
+redirect loop at login rather than as a message that names the problem.
+
+**Secrets in logs.** The code wraps tokens and the `state` value in
+[`Secret`](src/secret.rs), or gives them a `Debug` that redacts them. A
+`?config` field, a panic message or an error report therefore cannot print one.
 
 ## Configuration
 
