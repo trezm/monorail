@@ -8,7 +8,7 @@
 
 use std::fmt;
 
-use crate::error::ApiError;
+use crate::{error::ApiError, services::auth::AccessToken};
 
 pub type ProjectResult<T> = Result<T, ProjectManagerError>;
 
@@ -67,6 +67,10 @@ pub enum ProjectManagerError {
     #[error("a project named `{0}` already exists")]
     AlreadyExists(String),
 
+    /// The token was missing, expired, or not accepted by the backend.
+    #[error("the backend rejected the access token")]
+    Unauthorized,
+
     /// The backend was reachable but failed the operation.
     #[error(transparent)]
     Backend(#[from] anyhow::Error),
@@ -78,6 +82,7 @@ impl From<ProjectManagerError> for ApiError {
             ProjectManagerError::InvalidName(_) => Self::UnprocessableEntity(error.to_string()),
             ProjectManagerError::NotFound(_) => Self::NotFound(error.to_string()),
             ProjectManagerError::AlreadyExists(_) => Self::Conflict(error.to_string()),
+            ProjectManagerError::Unauthorized => Self::Unauthorized,
             ProjectManagerError::Backend(source) => Self::Internal(source),
         }
     }
@@ -85,20 +90,37 @@ impl From<ProjectManagerError> for ApiError {
 
 /// CRUD over projects.
 ///
+/// Every method takes the caller's [`AccessToken`]: the manager itself holds
+/// no ambient credentials, so one shared instance can serve requests on behalf
+/// of different callers.
+///
 /// `#[async_trait]` boxes the returned futures so the trait stays
 /// dyn-compatible: implementations are held as `Box<dyn ProjectManager>` (or
 /// `Arc<..>`) and chosen at runtime.
 #[async_trait::async_trait]
 pub trait ProjectManager: Send + Sync + 'static {
     /// Every project visible to this caller.
-    async fn list_projects(&self) -> ProjectResult<Vec<Project>>;
+    async fn list_projects(&self, access_token: &AccessToken) -> ProjectResult<Vec<Project>>;
 
     /// Creates a project called `name`, returning it as the backend recorded it.
-    async fn create_project(&self, name: &str) -> ProjectResult<Project>;
+    async fn create_project(
+        &self,
+        access_token: &AccessToken,
+        name: &str,
+    ) -> ProjectResult<Project>;
 
     /// Renames `project_id`, returning the project as it now stands.
-    async fn update_project(&self, project_id: &ProjectId, name: &str) -> ProjectResult<Project>;
+    async fn update_project(
+        &self,
+        access_token: &AccessToken,
+        project_id: &ProjectId,
+        name: &str,
+    ) -> ProjectResult<Project>;
 
     /// Deletes `project_id`, returning the id that was deleted.
-    async fn delete_project(&self, project_id: &ProjectId) -> ProjectResult<ProjectId>;
+    async fn delete_project(
+        &self,
+        access_token: &AccessToken,
+        project_id: &ProjectId,
+    ) -> ProjectResult<ProjectId>;
 }

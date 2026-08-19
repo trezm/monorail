@@ -6,11 +6,14 @@
 //!
 //! Railway's public API is GraphQL, so this holds the HTTP client that will
 //! carry those queries, plus the endpoint and per-request timeout it is
-//! configured with. The trait methods are still unimplemented.
+//! configured with. Credentials are not held here: every trait method takes
+//! the caller's access token, which will become the `Authorization` header
+//! on the GraphQL request. The trait methods are still unimplemented.
 
 use std::time::Duration;
 
 use crate::services::{
+    auth::AccessToken,
     project::{Project, ProjectId, ProjectManager, ProjectResult},
     service::{ServiceId, ServiceManager, ServiceResult},
 };
@@ -54,30 +57,51 @@ impl Railway {
 
 #[async_trait::async_trait]
 impl ServiceManager for Railway {
-    async fn create_service(&self, _github_url: &str) -> ServiceResult<ServiceId> {
+    async fn create_service(
+        &self,
+        _access_token: &AccessToken,
+        _github_url: &str,
+    ) -> ServiceResult<ServiceId> {
         todo!("deploy the repository as a Railway service")
     }
 
-    async fn destroy_service(&self, _service_id: &ServiceId) -> ServiceResult<ServiceId> {
+    async fn destroy_service(
+        &self,
+        _access_token: &AccessToken,
+        _service_id: &ServiceId,
+    ) -> ServiceResult<ServiceId> {
         todo!("delete the Railway service")
     }
 }
 
 #[async_trait::async_trait]
 impl ProjectManager for Railway {
-    async fn list_projects(&self) -> ProjectResult<Vec<Project>> {
+    async fn list_projects(&self, _access_token: &AccessToken) -> ProjectResult<Vec<Project>> {
         todo!("list the caller's Railway projects")
     }
 
-    async fn create_project(&self, _name: &str) -> ProjectResult<Project> {
+    async fn create_project(
+        &self,
+        _access_token: &AccessToken,
+        _name: &str,
+    ) -> ProjectResult<Project> {
         todo!("create a Railway project")
     }
 
-    async fn update_project(&self, _project_id: &ProjectId, _name: &str) -> ProjectResult<Project> {
+    async fn update_project(
+        &self,
+        _access_token: &AccessToken,
+        _project_id: &ProjectId,
+        _name: &str,
+    ) -> ProjectResult<Project> {
         todo!("rename a Railway project")
     }
 
-    async fn delete_project(&self, _project_id: &ProjectId) -> ProjectResult<ProjectId> {
+    async fn delete_project(
+        &self,
+        _access_token: &AccessToken,
+        _project_id: &ProjectId,
+    ) -> ProjectResult<ProjectId> {
         todo!("delete a Railway project")
     }
 }

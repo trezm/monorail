@@ -9,7 +9,7 @@
 
 use std::fmt;
 
-use crate::error::ApiError;
+use crate::{error::ApiError, services::auth::AccessToken};
 
 pub type ServiceResult<T> = Result<T, ServiceManagerError>;
 
@@ -57,6 +57,10 @@ pub enum ServiceManagerError {
     #[error("no capacity available to create a service")]
     CapacityExhausted,
 
+    /// The token was missing, expired, or not accepted by the backend.
+    #[error("the backend rejected the access token")]
+    Unauthorized,
+
     /// The backend was reachable but failed the operation.
     #[error(transparent)]
     Backend(#[from] anyhow::Error),
@@ -69,6 +73,7 @@ impl From<ServiceManagerError> for ApiError {
                 Self::UnprocessableEntity(error.to_string())
             }
             ServiceManagerError::NotFound(_) => Self::NotFound(error.to_string()),
+            ServiceManagerError::Unauthorized => Self::Unauthorized,
             // Retryable from the caller's point of view, but nothing about the
             // request itself was wrong.
             ServiceManagerError::CapacityExhausted => Self::Internal(error.into()),
@@ -79,6 +84,10 @@ impl From<ServiceManagerError> for ApiError {
 
 /// Creates and destroys services for a given repository.
 ///
+/// Every method takes the caller's [`AccessToken`]: the manager itself holds
+/// no ambient credentials, so one shared instance can serve requests on behalf
+/// of different callers.
+///
 /// `#[async_trait]` boxes the returned futures so the trait stays
 /// dyn-compatible: implementations are held as `Box<dyn ServiceManager>`
 /// (or `Arc<..>`) and chosen at runtime.
@@ -86,8 +95,16 @@ impl From<ServiceManagerError> for ApiError {
 pub trait ServiceManager: Send + Sync + 'static {
     /// Provisions a service for the repository at `github_url`, returning the
     /// id of the service that was created.
-    async fn create_service(&self, github_url: &str) -> ServiceResult<ServiceId>;
+    async fn create_service(
+        &self,
+        access_token: &AccessToken,
+        github_url: &str,
+    ) -> ServiceResult<ServiceId>;
 
     /// Tears down `service_id`, returning the id that was destroyed.
-    async fn destroy_service(&self, service_id: &ServiceId) -> ServiceResult<ServiceId>;
+    async fn destroy_service(
+        &self,
+        access_token: &AccessToken,
+        service_id: &ServiceId,
+    ) -> ServiceResult<ServiceId>;
 }
