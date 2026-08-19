@@ -30,6 +30,9 @@ jsonwebtoken = { version = "11.0.0", default-features = false, features = [
     "use_pem",
 ] }
 http-body-util = "0.1.5"
+# Test-only. Generates a mock per service trait, so a route test can assert on
+# what a handler asked a service for without a database behind it.
+mockall = "0.14.0"
 rand = "0.10.2"
 # rustls over ring, with the Mozilla root store compiled in by webpki-roots.
 # aws-lc-rs (reqwest 0.13's only rustls option) needs cmake, and a platform

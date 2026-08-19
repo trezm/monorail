@@ -29,13 +29,21 @@ The service requires Postgres and refuses to start without it. See
 | `src/secret.rs` | A wrapper that keeps a string out of logs. |
 | `src/routes/` | HTTP handlers, one module per resource. |
 | `src/services/` | Business logic, one trait per capability. |
+| `src/dao/` | Data access. Models per table, and the traits over them. |
+| `src/testing.rs` | Fixtures for the in-crate tests. `cfg(test)` only. |
 | `migrations/` | Schema history, embedded into the binary. |
 | `diesel.toml` | Read by diesel-cli only. |
-| `tests/api.rs` | End-to-end tests against the real router. |
+| `tests/api.rs` | The crate's public boundary, end to end. |
 
-The application lives in a library, not the binary, so `tests/api.rs` builds the
-real `Router` and drives it in-process with `tower::ServiceExt::oneshot` — no
-port binding, no flakiness, full middleware coverage.
+Requests flow `routes` → `services` → `dao` → Postgres, and each of those
+arrows is a trait. `dao` is the only layer that names a table or a column;
+`services` holds the rules and does not know where rows live. A DAO method
+takes its own pooled connection, which makes it the transaction boundary — so a
+write spanning two tables is one method rather than two the service composes.
+
+The application lives in a library, not the binary, so a test can build the real
+`Router` and drive it in-process with `tower::ServiceExt::oneshot` — no port
+binding, no flakiness, full middleware coverage.
 
 ## Conventions
 
@@ -62,6 +70,48 @@ request id is assigned before the tracing span opens, so every log line for a
 request carries `request_id`, and it comes back as the `x-request-id` header.
 
 **Path parameters.** axum 0.8 uses `/{id}`; the 0.7 `/:id` form no longer works.
+
+## Testing
+
+Tests live beside the code they cover, in a `#[cfg(test)]` module. A route test
+builds the whole application with `testing::app` and drives one request through
+it, so routing, extractors, middleware and serialization are all real — the only
+doubles are the services underneath, which `mockall` generates from their traits.
+
+```rust
+let mut sessions = MockSessionStore::new();
+sessions
+    .expect_end()
+    .withf(|token| token.expose() == "opaque-token")
+    .times(1)
+    .returning(|_| Ok(()));
+
+let app = testing::app(testing::state().with_sessions(Arc::new(sessions)));
+```
+
+That is the default for anything touching HTTP, and it is why every service is a
+trait and every trait carries `#[cfg_attr(test, mockall::automock)]`. It buys two
+things a database-backed test does not: no Postgres to start, and an assertion on
+what the handler *asked for* rather than on state that implies it. The example
+above fails if logout stops revoking, if it revokes the wrong token, or if it
+revokes twice — none of which a `204` alone would catch.
+
+`testing::state()` fills every collaborator with a mock that has no
+expectations, so reaching one the test did not arrange is a failure rather than
+a silent pass. Layer the ones under test on top with `with_auth`,
+`with_sessions` or `with_session_dao`; cut at whichever layer the test is about,
+mocking the DAOs to test a service and the service to test a route.
+
+`tests/api.rs` keeps only what a route test cannot see: that the crate assembles
+from outside its own boundary. Behaviour does not belong there.
+
+Queries themselves are the exception. A mock cannot catch `schema.rs` drifting
+from `migrations/`, and it has no transaction to roll back, so the two tests
+that cover those run real statements and are `#[ignore]`d by default:
+
+```bash
+tools/stack.sh db && bazel run //api:migrate && cargo test -p monorail-api -- --ignored
+```
 
 ## Database
 
@@ -196,9 +246,17 @@ redirect carrying an error code is the obvious follow-up.
 
 ### Sessions
 
-[`src/services/session.rs`](src/services/session.rs) owns them.
-`SessionStore` is the capability, `PgSessionStore` the Postgres implementation,
-and the trait is what lets the route tests run with a `HashMap` and no database.
+[`src/services/session.rs`](src/services/session.rs) owns them. `SessionStore`
+is the capability and `DaoSessionStore` implements it over
+[`src/dao/`](src/dao) — it decides that a session lasts `session_ttl` and is
+addressed by digest, while the DAO writes whatever it is handed.
+
+Opening a login writes `users` and `sessions` in one transaction, so a login
+leaves an account and its session or neither. That is why it is a single
+`SessionDao::open_login` rather than a call to each table in turn: two DAO calls
+would take two pooled connections, and no transaction can span those. A mock
+cannot show a rollback, so `a_login_that_fails_halfway_writes_no_user` is one of
+the two `#[ignore]`d tests that need real Postgres.
 
 The cookie holds an opaque token; the `sessions` row holds only its SHA-256
 digest, so a dump of that table yields no usable session. The digest is

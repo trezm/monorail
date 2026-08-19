@@ -213,3 +213,446 @@ fn harden(
 
     cookie
 }
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use axum::http::StatusCode;
+    use chrono::{TimeDelta, Utc};
+    use uuid::Uuid;
+
+    use super::{PENDING_COOKIE, SESSION_COOKIE};
+    use crate::{
+        config::Environment,
+        dao::{sessions::MockSessionDao, users::User},
+        db::DbError,
+        secret::Secret,
+        services::{
+            auth::{AuthError, MockAuthProvider, RailwayIdentity, TokenSet},
+            session::{MockSessionStore, Session, SessionError, SessionToken},
+        },
+        state::AppState,
+        testing,
+    };
+
+    const SUBJECT: &str = "user_stub";
+
+    /// A provider whose authorize URL echoes back the state and challenge the
+    /// handler generated, so the pending cookie can be checked against it.
+    fn provider() -> MockAuthProvider {
+        let mut auth = MockAuthProvider::new();
+
+        auth.expect_authorize_url().returning(|state, pkce| {
+            format!(
+                "https://provider.test/oauth/auth?state={}&code_challenge={}",
+                state.as_str(),
+                pkce.challenge()
+            )
+        });
+
+        auth
+    }
+
+    fn identity() -> RailwayIdentity {
+        RailwayIdentity {
+            subject: SUBJECT.to_owned(),
+            email: Some("jane@example.test".to_owned()),
+            name: Some("Jane Developer".to_owned()),
+            avatar_url: None,
+        }
+    }
+
+    fn tokens() -> TokenSet {
+        TokenSet {
+            access_token: Secret::new("access-stub"),
+            refresh_token: None,
+            id_token: None,
+            scope: "openid email".to_owned(),
+            expires_at: Utc::now() + TimeDelta::seconds(3600),
+        }
+    }
+
+    fn user() -> User {
+        User {
+            id: Uuid::nil(),
+            railway_user_id: SUBJECT.to_owned(),
+            email: identity().email,
+            name: identity().name,
+            avatar_url: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    fn session() -> Session {
+        Session {
+            id: Uuid::nil(),
+            user: user(),
+            tokens: tokens(),
+            expires_at: Utc::now() + TimeDelta::seconds(3600),
+        }
+    }
+
+    /// A provider that completes the code exchange, for the callback tests.
+    fn completing_provider() -> MockAuthProvider {
+        let mut auth = provider();
+
+        auth.expect_exchange_code()
+            .withf(|code, _| code == "code-ok")
+            .returning(|_, _| Ok(tokens()));
+        auth.expect_identity().returning(|_| Ok(identity()));
+
+        auth
+    }
+
+    /// Reproduces what the login handler set, so the callback can be driven
+    /// directly without following a redirect through a real provider.
+    fn pending(state: &str, verifier: &str) -> String {
+        format!("{PENDING_COOKIE}={state}.{verifier}")
+    }
+
+    #[tokio::test]
+    async fn login_redirects_to_the_provider_and_remembers_the_attempt() {
+        let app = testing::app(testing::state().with_auth(Arc::new(provider())));
+
+        let response = testing::raw(&app, testing::get("/auth/railway")).await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            testing::location(&response).starts_with("https://provider.test/oauth/auth?state="),
+            "got {}",
+            testing::location(&response)
+        );
+
+        let cookie = testing::set_cookie_named(&response, PENDING_COOKIE)
+            .expect("pending cookie should be set");
+
+        assert!(cookie.contains("HttpOnly"), "got {cookie}");
+        assert!(cookie.contains("SameSite=Lax"), "got {cookie}");
+        assert!(cookie.contains("Path=/auth"), "got {cookie}");
+        assert!(cookie.contains("Max-Age=600"), "got {cookie}");
+    }
+
+    /// Development runs over plain http, so `Secure` would stop the cookie
+    /// being sent at all. Anywhere else it must be there.
+    #[tokio::test]
+    async fn the_pending_cookie_is_secure_outside_development() {
+        let mut config = testing::config();
+        config.environment = Environment::Production;
+
+        let app = testing::app(AppState::new(config, Arc::new(provider())));
+
+        let response = testing::raw(&app, testing::get("/auth/railway")).await;
+        let cookie = testing::set_cookie_named(&response, PENDING_COOKIE)
+            .expect("pending cookie should be set");
+
+        assert!(cookie.contains("Secure"), "got {cookie}");
+    }
+
+    /// No pending cookie means nothing to check the returned state against.
+    /// The store is a mock with no expectations, so opening a session here
+    /// would panic rather than pass.
+    #[tokio::test]
+    async fn a_callback_without_the_pending_cookie_is_rejected() {
+        let app = testing::app(
+            testing::state()
+                .with_auth(Arc::new(provider()))
+                .with_sessions(Arc::new(MockSessionStore::new())),
+        );
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get("/auth/railway/callback?code=code-ok&state=whatever"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn a_callback_whose_state_does_not_match_is_rejected() {
+        let mut sessions = MockSessionStore::new();
+        sessions.expect_begin().never();
+
+        let app = testing::app(
+            testing::state()
+                .with_auth(Arc::new(provider()))
+                .with_sessions(Arc::new(sessions)),
+        );
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get_with_cookie(
+                "/auth/railway/callback?code=code-ok&state=attacker",
+                &pending("issued", "verifier"),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+
+    /// A declined consent screen is the user's decision, so it is a `403` and
+    /// not the `503` that an unreachable provider would give.
+    #[tokio::test]
+    async fn a_declined_consent_screen_is_not_reported_as_an_outage() {
+        let app = testing::app(
+            testing::state()
+                .with_auth(Arc::new(provider()))
+                .with_sessions(Arc::new(MockSessionStore::new())),
+        );
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get_with_cookie(
+                "/auth/railway/callback?error=access_denied&error_description=user%20said%20no",
+                &pending("issued", "verifier"),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    /// The exchange has to carry the verifier out of the pending cookie, not a
+    /// freshly generated one — get that wrong and every real login fails PKCE
+    /// while a test that only checks the redirect still passes.
+    #[tokio::test]
+    async fn a_completed_callback_forwards_the_pending_verifier_and_opens_a_session() {
+        let mut auth = provider();
+        auth.expect_exchange_code()
+            .withf(|code, pkce| code == "code-ok" && pkce.verifier() == "verifier")
+            .times(1)
+            .returning(|_, _| Ok(tokens()));
+        auth.expect_identity()
+            .withf(|access_token| access_token.expose() == "access-stub")
+            .times(1)
+            .returning(|_| Ok(identity()));
+
+        let mut sessions = MockSessionStore::new();
+        sessions
+            .expect_begin()
+            .withf(|identity, tokens| {
+                identity.subject == SUBJECT && tokens.access_token.expose() == "access-stub"
+            })
+            .times(1)
+            .returning(|_, _| Ok((SessionToken::new("opaque-token"), session())));
+
+        let app = testing::app(
+            testing::state()
+                .with_auth(Arc::new(auth))
+                .with_sessions(Arc::new(sessions)),
+        );
+
+        let response = testing::raw(
+            &app,
+            testing::get_with_cookie(
+                "/auth/railway/callback?code=code-ok&state=issued",
+                &pending("issued", "verifier"),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert_eq!(testing::location(&response), "http://localhost:4321/");
+
+        let session_cookie = testing::set_cookie_named(&response, SESSION_COOKIE)
+            .expect("session cookie should be set");
+        assert!(
+            session_cookie.contains("opaque-token"),
+            "got {session_cookie}"
+        );
+        assert!(session_cookie.contains("HttpOnly"), "got {session_cookie}");
+        assert!(session_cookie.contains("Path=/"), "got {session_cookie}");
+
+        let cleared = testing::set_cookie_named(&response, PENDING_COOKIE)
+            .expect("pending cookie should be cleared");
+        assert!(cleared.contains("Max-Age=0"), "got {cleared}");
+    }
+
+    /// The provider is reachable but refuses the grant. That is the user's
+    /// problem to retry, not an outage, so it stays a `400`.
+    #[tokio::test]
+    async fn a_rejected_authorization_code_does_not_open_a_session() {
+        let mut auth = provider();
+        auth.expect_exchange_code()
+            .returning(|_, _| Err(AuthError::InvalidGrant));
+
+        let mut sessions = MockSessionStore::new();
+        sessions.expect_begin().never();
+
+        let app = testing::app(
+            testing::state()
+                .with_auth(Arc::new(auth))
+                .with_sessions(Arc::new(sessions)),
+        );
+
+        let response = testing::raw(
+            &app,
+            testing::get_with_cookie(
+                "/auth/railway/callback?code=code-ok&state=issued",
+                &pending("issued", "verifier"),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+        assert!(
+            testing::set_cookie_named(&response, SESSION_COOKIE).is_none(),
+            "a failed login should set no session cookie"
+        );
+    }
+
+    /// The whole point of the round trip: the state and verifier the login
+    /// handler minted are the ones the callback has to accept.
+    #[tokio::test]
+    async fn a_login_started_here_completes_here() {
+        let mut sessions = MockSessionStore::new();
+        sessions
+            .expect_begin()
+            .times(1)
+            .returning(|_, _| Ok((SessionToken::new("opaque-token"), session())));
+
+        let app = testing::app(
+            testing::state()
+                .with_auth(Arc::new(completing_provider()))
+                .with_sessions(Arc::new(sessions)),
+        );
+
+        let started = testing::raw(&app, testing::get("/auth/railway")).await;
+        let issued = testing::location(&started);
+        let issued_state = issued
+            .split("state=")
+            .nth(1)
+            .and_then(|rest| rest.split('&').next())
+            .expect("the redirect should carry a state");
+        let pending_cookie =
+            testing::cookie_pair(&started, PENDING_COOKIE).expect("pending cookie should be set");
+
+        let completed = testing::raw(
+            &app,
+            testing::get_with_cookie(
+                &format!("/auth/railway/callback?code=code-ok&state={issued_state}"),
+                &pending_cookie,
+            ),
+        )
+        .await;
+
+        assert_eq!(completed.status(), StatusCode::SEE_OTHER);
+        assert!(testing::set_cookie_named(&completed, SESSION_COOKIE).is_some());
+    }
+
+    #[tokio::test]
+    async fn logout_revokes_the_session_behind_the_cookie_and_clears_it() {
+        let mut sessions = MockSessionStore::new();
+        sessions
+            .expect_end()
+            .withf(|token| token.expose() == "opaque-token")
+            .times(1)
+            .returning(|_| Ok(()));
+
+        let app = testing::app(testing::state().with_sessions(Arc::new(sessions)));
+
+        let response = testing::raw(
+            &app,
+            testing::delete_with_cookie("/auth/session", &format!("{SESSION_COOKIE}=opaque-token")),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+        let cleared = testing::set_cookie_named(&response, SESSION_COOKIE)
+            .expect("session cookie should be cleared");
+        assert!(cleared.contains("Max-Age=0"), "got {cleared}");
+    }
+
+    /// Logging out without a cookie is not an error, and must not reach the
+    /// store — `expect_end().never()` is the assertion that it does not.
+    #[tokio::test]
+    async fn logout_without_a_session_cookie_is_still_a_success() {
+        let mut sessions = MockSessionStore::new();
+        sessions.expect_end().never();
+
+        let app = testing::app(testing::state().with_sessions(Arc::new(sessions)));
+
+        let (status, _) = testing::send(
+            &app,
+            testing::delete_with_cookie("/auth/session", "unrelated=value"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NO_CONTENT);
+    }
+
+    /// The one test that leaves the session store real, so handler, store and
+    /// DAO are all under test and only the rows are mocked. Every other test
+    /// here cuts at one seam, which proves each layer against its own double
+    /// but not that the layers are wired to each other.
+    #[tokio::test]
+    async fn a_login_reaches_the_dao_layer_through_the_real_store() {
+        let mut sessions = MockSessionDao::new();
+        sessions
+            .expect_open_login()
+            .times(1)
+            .returning(|new_user, session, _| {
+                assert_eq!(new_user.railway_user_id, SUBJECT);
+                assert_eq!(new_user.email.as_deref(), Some("jane@example.test"));
+                assert_eq!(
+                    session.token_hash.len(),
+                    32,
+                    "the row is keyed on the digest, not the token"
+                );
+                assert_eq!(session.access_token.expose(), "access-stub");
+
+                Ok((user(), Uuid::from_u128(2)))
+            });
+
+        let app = testing::app(
+            testing::state()
+                .with_auth(Arc::new(completing_provider()))
+                .with_session_dao(Arc::new(sessions)),
+        );
+
+        let response = testing::raw(
+            &app,
+            testing::get_with_cookie(
+                "/auth/railway/callback?code=code-ok&state=issued",
+                &pending("issued", "verifier"),
+            ),
+        )
+        .await;
+
+        assert_eq!(response.status(), StatusCode::SEE_OTHER);
+        assert!(
+            testing::set_cookie_named(&response, SESSION_COOKIE).is_some(),
+            "a session cookie should reach the browser"
+        );
+    }
+
+    /// A store that cannot reach Postgres must surface as a retryable `503` on
+    /// the standard envelope, not a `500`.
+    #[tokio::test]
+    async fn a_store_outage_during_logout_is_reported_as_unavailable() {
+        let mut sessions = MockSessionStore::new();
+        sessions.expect_end().times(1).returning(|_| {
+            Err(SessionError::Database(DbError::Unavailable(
+                anyhow::anyhow!("pool exhausted"),
+            )))
+        });
+
+        let app = testing::app(testing::state().with_sessions(Arc::new(sessions)));
+
+        let (status, body) = testing::send(
+            &app,
+            testing::delete_with_cookie("/auth/session", &format!("{SESSION_COOKIE}=opaque-token")),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "service_unavailable");
+    }
+}

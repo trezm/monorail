@@ -32,10 +32,11 @@ tools/cache.sh       Report/prune Bazel output bases across worktrees.
 
 `api/src` splits as: `main.rs` (process wiring only) → `lib.rs` (router +
 middleware stack) → `routes/` (one module per resource, each exporting
-`router()`) → `services/` (capabilities behind traits, HTTP-agnostic) with
+`router()`) → `services/` (capabilities behind traits, HTTP-agnostic) →
+`dao/` (models per table, the only layer that names a table or column) with
 `config.rs`, `constants.rs`, `error.rs`, `extract.rs`, `state.rs`,
-`telemetry.rs`, `shutdown.rs` as support. See `api/README.md` for per-file
-responsibilities.
+`telemetry.rs`, `shutdown.rs` as support and `testing.rs` (`cfg(test)` only) for
+fixtures. See `api/README.md` for per-file responsibilities.
 
 ## Running it
 
@@ -77,12 +78,26 @@ and a repin. Keep the Bazel target name equal to the Cargo package name —
 - Services expose traits (see `services::container`) so handlers depend on
   behaviour, not on a backend. Service errors are independent of `ApiError`;
   one `From` impl decides how each case surfaces.
+- Every service and DAO trait carries `#[cfg_attr(test, mockall::automock)]`,
+  above `#[async_trait]` — mockall requires that order. Add it with the trait,
+  not later.
+- A DAO trait method takes its own pooled connection, so it is the transaction
+  boundary. A write spanning tables is therefore one method, not two composed
+  by the service above — see `SessionDao::open_login`.
+- Collaborators reach a handler through `AppState`, never as a concrete type,
+  so a test can swap any of them for a mock.
 - Middleware order in `lib.rs` is load-bearing. Changing it changes what gets
   logged and redacted.
 - Config is `API_`-prefixed and every setting has a default; add new ones to
   `constants.rs`, `config.rs`, and `api/.env.example` together.
 - axum 0.8 path syntax is `/{id}`.
-- Unit tests live in `#[cfg(test)]` modules; end-to-end tests drive the real
-  router in-process in `api/tests/api.rs`. Prefer the latter for anything
-  touching HTTP.
+- Tests live in `#[cfg(test)]` modules beside the code. For anything touching
+  HTTP that means a route test: build the whole app with `testing::app`, drive
+  one request, and mock the services under it. No database, and the assertion
+  is on what the handler asked for. `api/tests/api.rs` keeps only what proves
+  the crate assembles from outside its own boundary — not behaviour.
+- `testing::state()` leaves every collaborator a mock with no expectations, so
+  reaching an unarranged one fails rather than passes quietly.
+- A test that must exercise real SQL — the only way `schema.rs` drift is
+  caught — is `#[ignore]`d, so `bazel test //...` needs no Postgres.
 - `unsafe_code` is forbidden; clippy runs at `pedantic`.
