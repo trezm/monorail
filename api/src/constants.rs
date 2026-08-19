@@ -22,6 +22,8 @@ pub const RAILWAY_REDIRECT_URI: &str = "API_RAILWAY_REDIRECT_URI";
 pub const RAILWAY_SCOPES: &str = "API_RAILWAY_SCOPES";
 pub const RAILWAY_ISSUER: &str = "API_RAILWAY_ISSUER";
 pub const RAILWAY_TIMEOUT_SECS: &str = "API_RAILWAY_TIMEOUT_SECS";
+pub const SESSION_TTL_SECS: &str = "API_SESSION_TTL_SECS";
+pub const AUTH_SUCCESS_REDIRECT: &str = "API_AUTH_SUCCESS_REDIRECT";
 
 pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_LOG_FILTER: &str = "info,tower_http=debug,monorail_api=debug";
@@ -49,3 +51,12 @@ pub const DEFAULT_RAILWAY_SCOPES: &str = "openid email profile project:member wo
 pub const REQUIRED_RAILWAY_SCOPE: &str = "openid";
 
 pub const DEFAULT_RAILWAY_TIMEOUT_SECS: u64 = 10;
+
+/// How long a login lasts. Two weeks trades a re-login against the window a
+/// stolen cookie stays useful; sessions are revocable either way, since the
+/// row and not the cookie is the authority.
+pub const DEFAULT_SESSION_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+
+/// Where a finished login sends the browser. The default is the Astro dev
+/// server, which is what a local checkout runs.
+pub const DEFAULT_AUTH_SUCCESS_REDIRECT: &str = "http://localhost:4321/";

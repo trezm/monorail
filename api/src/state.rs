@@ -10,13 +10,23 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::{config::Config, db::Database, services::auth::AuthProvider};
+use chrono::TimeDelta;
+
+use crate::{
+    config::Config,
+    db::Database,
+    services::{
+        auth::AuthProvider,
+        session::{PgSessionStore, SessionStore},
+    },
+};
 
 #[derive(Clone)]
 pub struct AppState {
     config: Arc<Config>,
     database: Database,
     auth: Arc<dyn AuthProvider>,
+    sessions: Arc<dyn SessionStore>,
     started_at: Instant,
 }
 
@@ -31,11 +41,15 @@ impl AppState {
     #[must_use]
     pub fn new(config: Config, auth: Arc<dyn AuthProvider>) -> Self {
         let database = Database::new(&config);
+        let ttl = TimeDelta::from_std(config.session_ttl)
+            .unwrap_or_else(|_| TimeDelta::try_days(14).unwrap_or_default());
+        let sessions = Arc::new(PgSessionStore::new(database.clone(), ttl));
 
         Self {
             config: Arc::new(config),
             database,
             auth,
+            sessions,
             started_at: Instant::now(),
         }
     }
@@ -48,6 +62,19 @@ impl AppState {
     #[must_use]
     pub fn db(&self) -> &Database {
         &self.database
+    }
+
+    /// Swaps in a different session store, for a test that needs one that is
+    /// not Postgres.
+    #[must_use]
+    pub fn with_sessions(mut self, sessions: Arc<dyn SessionStore>) -> Self {
+        self.sessions = sessions;
+        self
+    }
+
+    #[must_use]
+    pub fn sessions(&self) -> &dyn SessionStore {
+        self.sessions.as_ref()
     }
 
     #[must_use]

@@ -177,6 +177,11 @@ pub struct Config {
     /// covers queueing behind a busy pool as well as opening a new connection.
     pub database_connect_timeout: Duration,
     pub railway_oauth: OAuthConfig,
+    /// How long a session cookie stays valid. Enforced against the stored
+    /// session, not the cookie's own `Max-Age`, which a client controls.
+    pub session_ttl: Duration,
+    /// Where a completed login sends the browser.
+    pub auth_success_redirect: String,
 }
 
 /// Everything a login against Railway needs.
@@ -252,6 +257,14 @@ impl Config {
                 constants::DEFAULT_DATABASE_CONNECT_TIMEOUT_SECS,
             )?),
             railway_oauth: railway_oauth()?,
+            session_ttl: Duration::from_secs(parsed(
+                constants::SESSION_TTL_SECS,
+                constants::DEFAULT_SESSION_TTL_SECS,
+            )?),
+            auth_success_redirect: parsed(
+                constants::AUTH_SUCCESS_REDIRECT,
+                constants::DEFAULT_AUTH_SUCCESS_REDIRECT.to_owned(),
+            )?,
         })
     }
 }

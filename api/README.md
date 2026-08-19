@@ -19,6 +19,7 @@ The service requires Postgres and refuses to start without it. See
 | `src/config.rs` | Environment parsing. Every setting has a default. |
 | `src/constants.rs` | Environment variable names and their defaults. |
 | `src/db.rs` | The Postgres pool, and the embedded migrations. |
+| `src/schema.rs` | The tables, as diesel sees them. Hand-written. |
 | `src/error.rs` | `ApiError` and the JSON error envelope. |
 | `src/extract.rs` | Extractors that reject with `ApiError`. |
 | `src/state.rs` | `AppState`, one `Arc` around everything shared. |
@@ -154,6 +155,55 @@ the service runs with authentication disabled.
 **Secrets in logs.** The code wraps tokens and the `state` value in
 [`Secret`](src/secret.rs), or gives them a `Debug` that redacts them. A
 `?config` field, a panic message or an error report therefore cannot print one.
+
+### The flow
+
+| Route | |
+|---|---|
+| `GET /auth/railway/login` | mints `state` and a PKCE pair, sets the pending cookie, redirects to Railway |
+| `GET /auth/railway/callback` | checks `state`, exchanges the code, reads the identity, opens a session |
+| `POST /auth/logout` | deletes the session row and clears the cookie |
+| `GET /api/v1/auth/me` | the logged-in user, or `401` |
+
+The first three are outside `/api/v1` because they are browser redirects, not a
+versioned API — the same reason `health` is. `me` is the one the UI calls, so it
+is versioned.
+
+Two cookies. The pending cookie carries `state` and the PKCE verifier for the
+ten minutes between the redirect out and the callback back; comparing the
+`state` query parameter against it is the standard double-submit check.
+`SameSite=Lax` is required rather than preferred — the callback is a top-level
+cross-site GET and `Strict` would withhold the cookie exactly when it is needed.
+Neither uses the `__Host-` prefix, which mandates `Secure` and so cannot work
+over the `http://localhost` a local checkout runs on; `Secure` is set everywhere
+except development instead.
+
+A failed login answers on the error envelope rather than redirecting somewhere
+friendlier, so a user who declines consent sees JSON. Swapping that for a
+redirect carrying an error code is the obvious follow-up.
+
+### Sessions
+
+[`src/services/session.rs`](src/services/session.rs) owns them.
+`SessionStore` is the capability, `PgSessionStore` the Postgres implementation,
+and the trait is what lets the route tests run with a `HashMap` and no database.
+
+The cookie holds an opaque token; the `sessions` row holds only its SHA-256
+digest, so a dump of that table yields no usable session. The digest is
+unsalted and unstretched on purpose: the input is 256 bits of uniform
+randomness, so there is no dictionary to defend against and a slow hash would
+tax every authenticated request for nothing. Expiry is checked against the row,
+never the cookie's `Max-Age`, which a client controls.
+
+The Railway access and refresh tokens live in that row, because the point of
+logging in with Railway is to act on Railway afterwards and a one-hour token has
+to outlive the request that fetched it. They are stored in plaintext columns:
+that table is as sensitive as the database, and encrypting the columns is the
+obvious next step. Expired rows are not swept yet either.
+
+`CurrentUser` in [`src/extract.rs`](src/extract.rs) is how an endpoint requires
+a login — it costs one query, and rejects with `401` whether the cookie is
+absent, unknown or expired.
 
 ## Configuration
 

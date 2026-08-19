@@ -25,14 +25,13 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
 use url::Url;
 
-use crate::{config::OAuthConfig, error::ApiError, secret::Secret};
+use crate::{
+    config::OAuthConfig,
+    error::ApiError,
+    secret::{Secret, random_token},
+};
 
 pub type AuthResult<T> = Result<T, AuthError>;
-
-/// Bytes of entropy behind [`CsrfState`] and a PKCE verifier. 32 is the ceiling
-/// RFC 7636 §4.1 allows for a verifier once base64url-encoded, and well past
-/// what an attacker could guess.
-const ENTROPY_BYTES: usize = 32;
 
 /// What can go wrong while authenticating someone.
 ///
@@ -403,13 +402,6 @@ fn token_error(status: reqwest::StatusCode, body: &[u8]) -> AuthError {
                 .unwrap_or_default()
         )),
     }
-}
-
-fn random_token() -> String {
-    let mut bytes = [0u8; ENTROPY_BYTES];
-    rand::fill(&mut bytes);
-
-    URL_SAFE_NO_PAD.encode(bytes)
 }
 
 fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
