@@ -146,12 +146,10 @@ Connect Core §3.1.3.7 exempts from the signature check. Second, the service
 reads the user's identity from the userinfo endpoint, so no code parses the
 JWT.
 
-**Partial configuration.** `AppState::auth()` returns an `Option`. If you
-configure no OAuth app at all, the service still starts and the login routes
-return `503`. If you configure some of the client ID, client secret and
-redirect URI but not all three, the service fails at startup instead. That
-combination is a deployment mistake, and starting anyway would surface it as a
-redirect loop at login rather than as a message that names the problem.
+**Configuration.** The client ID, client secret and redirect URI are
+required. If any of them is missing, the service fails at startup and names the
+one it wanted. Nothing here works without a login, so there is no mode in which
+the service runs with authentication disabled.
 
 **Secrets in logs.** The code wraps tokens and the `state` value in
 [`Secret`](src/secret.rs), or gives them a `Debug` that redacts them. A

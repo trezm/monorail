@@ -16,7 +16,7 @@ use crate::{config::Config, db::Database, services::auth::AuthProvider};
 pub struct AppState {
     config: Arc<Config>,
     database: Database,
-    auth: Option<Arc<dyn AuthProvider>>,
+    auth: Arc<dyn AuthProvider>,
     started_at: Instant,
 }
 
@@ -25,27 +25,19 @@ impl AppState {
     ///
     /// Infallible and synchronous: the pool connects lazily, so nothing here
     /// touches the network. See [`Database::new`].
+    ///
+    /// The provider is passed in rather than built here because building one
+    /// can fail, and because it is what lets a test install a stub.
     #[must_use]
-    pub fn new(config: Config) -> Self {
+    pub fn new(config: Config, auth: Arc<dyn AuthProvider>) -> Self {
         let database = Database::new(&config);
 
         Self {
             config: Arc::new(config),
             database,
-            auth: None,
+            auth,
             started_at: Instant::now(),
         }
-    }
-
-    /// Attaches an identity provider.
-    ///
-    /// Separate from [`Self::new`] because building one can fail and reaches
-    /// the network, neither of which belongs in state construction — and
-    /// because it is what lets a test install a stub provider.
-    #[must_use]
-    pub fn with_auth(mut self, auth: Arc<dyn AuthProvider>) -> Self {
-        self.auth = Some(auth);
-        self
     }
 
     #[must_use]
@@ -58,11 +50,9 @@ impl AppState {
         &self.database
     }
 
-    /// `None` when Railway OAuth is not configured; handlers that need it
-    /// should answer `503` rather than pretend.
     #[must_use]
-    pub fn auth(&self) -> Option<&dyn AuthProvider> {
-        self.auth.as_deref()
+    pub fn auth(&self) -> &dyn AuthProvider {
+        self.auth.as_ref()
     }
 
     #[must_use]
@@ -78,7 +68,6 @@ impl fmt::Debug for AppState {
         f.debug_struct("AppState")
             .field("config", &self.config)
             .field("database", &self.database)
-            .field("auth", &self.auth.is_some())
             .finish_non_exhaustive()
     }
 }

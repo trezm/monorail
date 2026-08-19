@@ -22,8 +22,8 @@ pub enum ConfigError {
     NotUnicode { key: String },
     #[error("{key} must be set outside development")]
     Missing { key: String },
-    #[error("{key} must be set too, or none of the Railway OAuth variables should be")]
-    Incomplete { key: String },
+    #[error("{key} must be set")]
+    Required { key: String },
     #[error("{key}=\"{value}\" could not be parsed: {source}")]
     Invalid {
         key: String,
@@ -176,17 +176,14 @@ pub struct Config {
     /// How long a request waits for a pooled connection before giving up. This
     /// covers queueing behind a busy pool as well as opening a new connection.
     pub database_connect_timeout: Duration,
-    /// `None` disables the Railway login routes, which then answer `503`.
-    pub railway_oauth: Option<OAuthConfig>,
+    pub railway_oauth: OAuthConfig,
 }
 
 /// Everything a login against Railway needs.
 ///
-/// Built only when the three settings that have no defensible default —
-/// client id, client secret, redirect URI — are all present. Setting some but
-/// not all is a startup error: a half-configured OAuth app is a deployment
-/// mistake rather than a decision, and the failure it produces otherwise is a
-/// redirect loop rather than anything readable.
+/// The client id, client secret and redirect URI have no defensible default
+/// and are required. There is nothing to do with this service without a login,
+/// so a missing one is a startup error rather than a disabled feature.
 #[derive(Debug, Clone)]
 pub struct OAuthConfig {
     /// Base URL of the provider, always with a trailing slash so joining a
@@ -282,42 +279,19 @@ fn database_url(environment: Environment) -> Result<DatabaseUrl, ConfigError> {
     }
 }
 
-/// Assembles the Railway OAuth settings, or `None` when the feature is simply
-/// not configured.
-fn railway_oauth() -> Result<Option<OAuthConfig>, ConfigError> {
-    let credentials = (
-        present(constants::RAILWAY_CLIENT_ID)?,
-        present(constants::RAILWAY_CLIENT_SECRET)?,
-        present(constants::RAILWAY_REDIRECT_URI)?,
-    );
-
-    let (client_id, client_secret, redirect_uri) = match credentials {
-        (None, None, None) => return Ok(None),
-        (Some(client_id), Some(client_secret), Some(redirect_uri)) => {
-            (client_id, client_secret, redirect_uri)
-        }
-        (client_id, client_secret, redirect_uri) => {
-            return Err(ConfigError::Incomplete {
-                key: first_absent(&[
-                    (constants::RAILWAY_CLIENT_ID, client_id.is_none()),
-                    (constants::RAILWAY_CLIENT_SECRET, client_secret.is_none()),
-                    (constants::RAILWAY_REDIRECT_URI, redirect_uri.is_none()),
-                ]),
-            });
-        }
-    };
-
-    Ok(Some(OAuthConfig {
+/// Assembles the Railway OAuth settings.
+fn railway_oauth() -> Result<OAuthConfig, ConfigError> {
+    Ok(OAuthConfig {
         issuer: issuer()?,
-        client_id,
-        client_secret: Secret::new(client_secret),
-        redirect_uri,
+        client_id: required(constants::RAILWAY_CLIENT_ID)?,
+        client_secret: Secret::new(required(constants::RAILWAY_CLIENT_SECRET)?),
+        redirect_uri: required(constants::RAILWAY_REDIRECT_URI)?,
         scopes: scopes()?,
         timeout: Duration::from_secs(parsed(
             constants::RAILWAY_TIMEOUT_SECS,
             constants::DEFAULT_RAILWAY_TIMEOUT_SECS,
         )?),
-    }))
+    })
 }
 
 /// Normalises the issuer to end in `/`. Without that, `Url::join("oauth/token")`
@@ -370,11 +344,11 @@ fn scopes() -> Result<Vec<String>, ConfigError> {
     Ok(scopes)
 }
 
-fn first_absent(candidates: &[(&str, bool)]) -> String {
-    candidates
-        .iter()
-        .find_map(|(key, absent)| absent.then(|| (*key).to_owned()))
-        .unwrap_or_default()
+/// Reads `key`, failing when it is absent.
+fn required(key: &str) -> Result<String, ConfigError> {
+    present(key)?.ok_or_else(|| ConfigError::Required {
+        key: key.to_owned(),
+    })
 }
 
 /// Reads `key`, treating unset and empty-after-trim alike. An exported-but-empty

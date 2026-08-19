@@ -3,7 +3,10 @@
 //! `oneshot` drives the assembled `Router` directly, so these exercise routing,
 //! extractors, middleware and serialization without binding a port.
 
-use std::net::{IpAddr, Ipv4Addr};
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    sync::Arc,
+};
 
 use axum::{
     Router,
@@ -12,8 +15,9 @@ use axum::{
 };
 use http_body_util::BodyExt as _;
 use monorail_api::{
-    AppState,
-    config::{Config, CorsOrigins, DatabaseUrl, Environment, LogFormat},
+    AppState, RailwayAuth,
+    config::{Config, CorsOrigins, DatabaseUrl, Environment, LogFormat, OAuthConfig},
+    secret::Secret,
 };
 use serde_json::Value;
 use tower::ServiceExt as _;
@@ -35,12 +39,28 @@ fn test_config() -> Config {
         database_url: DatabaseUrl::new("postgres://unused@127.0.0.1:1/unused"),
         database_pool_size: 1,
         database_connect_timeout: std::time::Duration::from_millis(50),
-        railway_oauth: None,
+        railway_oauth: test_oauth(),
+    }
+}
+
+/// Points at an issuer nothing listens on. No test here reaches the provider;
+/// the ones that do live in `services::auth` and run their own server.
+fn test_oauth() -> OAuthConfig {
+    OAuthConfig {
+        issuer: "http://127.0.0.1:1/".parse().expect("issuer should parse"),
+        client_id: "test-client".to_owned(),
+        client_secret: Secret::new("test-secret"),
+        redirect_uri: "http://127.0.0.1:1/auth/railway/callback".to_owned(),
+        scopes: vec!["openid".to_owned()],
+        timeout: std::time::Duration::from_millis(50),
     }
 }
 
 fn app() -> Router {
-    monorail_api::app(AppState::new(test_config()))
+    let config = test_config();
+    let auth = RailwayAuth::new(config.railway_oauth.clone()).expect("client should build");
+
+    monorail_api::app(AppState::new(config, Arc::new(auth)))
 }
 
 async fn send(app: &Router, request: Request<Body>) -> (StatusCode, Value) {

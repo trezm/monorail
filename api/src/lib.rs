@@ -104,17 +104,8 @@ pub fn app(state: AppState) -> Router {
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.host, config.port));
     let oauth = config.railway_oauth.clone();
-    let mut state = AppState::new(config);
-
-    if let Some(oauth) = oauth {
-        tracing::info!(issuer = %oauth.issuer, scopes = ?oauth.scopes, "Railway login enabled");
-        state = state.with_auth(Arc::new(RailwayAuth::new(oauth)?));
-    } else {
-        tracing::warn!(
-            "Railway login is disabled; set {} to enable it",
-            constants::RAILWAY_CLIENT_ID
-        );
-    }
+    tracing::info!(issuer = %oauth.issuer, scopes = ?oauth.scopes, "Railway login enabled");
+    let state = AppState::new(config, Arc::new(RailwayAuth::new(oauth)?));
 
     state.db().ping().await.with_context(|| {
         format!(
