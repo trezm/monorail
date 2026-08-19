@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
-# Bring up the local test stack: Postgres in Docker, the API on the host.
+# Bring up the local test stack: Postgres in Docker, the UI and API on the host.
 #
-#   tools/stack.sh up       # Postgres, migrations, then the API in the foreground
+#   tools/stack.sh up       # Postgres, migrations, then the UI and the API
 #   tools/stack.sh db       # Postgres alone, detached
 #   tools/stack.sh ui       # the Astro dev server on :4321
 #   tools/stack.sh down     # stop Postgres; the data volume survives
@@ -13,9 +13,9 @@
 #
 # Only the database is containerized. Building the API in a container means a
 # full non-incremental Cargo compile on every edit, which is minutes against
-# Bazel's seconds — so `up` starts Postgres, migrates, and then execs
-# `bazel run //api` in the foreground. Ctrl-C stops the API and leaves the
-# database running; `down` stops that too.
+# Bazel's seconds — so `up` starts Postgres, migrates, and then runs the UI and
+# the API on the host. Ctrl-C stops both and leaves the database running;
+# `down` stops that too.
 
 set -euo pipefail
 
@@ -43,13 +43,22 @@ case "${1:-}" in
 up)
     start_postgres
     bazel run //api:migrate
+    # `bazel run` holds the workspace lock for as long as the process it starts,
+    # so a second one would block until the first exits. The UI gets a generated
+    # launcher instead, leaving the lock free for the API.
+    ui_script="$(mktemp -t monorail-ui)"
+    bazel run --script_path="${ui_script}" //ui:dev
+    # `kill 0` and not the job's pid: the launcher does not pass signals on to
+    # the astro process it spawns, so that one outlives a targeted kill. The
+    # whole process group goes down together instead.
+    trap 'rm -f "${ui_script}"; trap - EXIT; kill 0' EXIT
+    "${ui_script}" &
     echo
     echo "Postgres ${URL}"
-    echo "Starting the API on http://localhost:8080 — Ctrl-C to stop it."
-    echo "For the UI, run 'tools/stack.sh ui' in another terminal."
+    echo "Starting the UI on http://localhost:4321 and the API on"
+    echo "http://localhost:8080 — Ctrl-C to stop both."
     echo
-    # exec so Ctrl-C reaches the server's own shutdown handler.
-    exec bazel run //api
+    bazel run //api
     ;;
 ui)
     exec bazel run //ui:dev

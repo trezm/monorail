@@ -3,7 +3,7 @@
 HTTP API service built on [axum](https://github.com/tokio-rs/axum).
 
 ```bash
-tools/stack.sh up                                # Postgres, then the API
+tools/stack.sh up                                # Postgres, the UI, then the API
 curl localhost:8080/health/ready
 ```
 
