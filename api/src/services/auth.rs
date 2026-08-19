@@ -10,11 +10,12 @@
 //!    [`AuthProvider::exchange_code`] trades for a [`TokenSet`].
 //! 3. [`AuthProvider::identity`] reads the user behind that token.
 //!
-//! The ID token's signature is not checked and no JWKS client exists here. The
-//! token set arrives over TLS from a direct, client-authenticated call to the
-//! token endpoint rather than through the browser, which `OpenID` Connect Core
-//! §3.1.3.7 exempts from signature validation. Identity comes from the
-//! userinfo endpoint, so nothing depends on parsing the JWT at all.
+//! Every ID token is verified against the provider's published keys — see
+//! [`crate::services::jwks`] — for signature, issuer, audience and expiry.
+//! `OpenID` Connect Core §3.1.3.7 exempts a token set fetched this way, over
+//! TLS from a direct client-authenticated call rather than through the browser,
+//! but the check costs one cached key fetch and does not rest on that argument
+//! staying true. Identity itself still comes from the userinfo endpoint.
 
 use std::fmt;
 
@@ -23,16 +24,17 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 use url::Url;
 
-use crate::{config::OAuthConfig, error::ApiError, secret::Secret};
+use crate::{
+    config::OAuthConfig,
+    error::ApiError,
+    secret::{Secret, random_token},
+    services::jwks::Jwks,
+};
 
 pub type AuthResult<T> = Result<T, AuthError>;
-
-/// Bytes of entropy behind [`CsrfState`] and a PKCE verifier. 32 is the ceiling
-/// RFC 7636 §4.1 allows for a verifier once base64url-encoded, and well past
-/// what an attacker could guess.
-const ENTROPY_BYTES: usize = 32;
 
 /// What can go wrong while authenticating someone.
 ///
@@ -54,6 +56,11 @@ pub enum AuthError {
     #[error("access was denied")]
     Denied,
 
+    /// The ID token did not verify: bad signature, unknown key, wrong issuer or
+    /// audience, or expired. Never a transient fault, so it is not retried.
+    #[error("the identity token could not be verified")]
+    InvalidIdToken(#[source] anyhow::Error),
+
     /// The provider was unreachable, or answered something unusable. Retryable,
     /// and nothing about the request was wrong.
     #[error("the identity provider is unavailable")]
@@ -70,6 +77,10 @@ impl From<AuthError> for ApiError {
                 Self::BadRequest(error.to_string())
             }
             AuthError::Denied => Self::Forbidden,
+            AuthError::InvalidIdToken(ref source) => {
+                tracing::warn!(error = ?source, "an id token failed verification");
+                Self::BadRequest(error.to_string())
+            }
             AuthError::Provider(source) => Self::Unavailable(source),
             AuthError::Backend(source) => Self::Internal(source),
         }
@@ -101,7 +112,7 @@ impl CsrfState {
     /// of how many leading characters happen to match.
     #[must_use]
     pub fn matches(&self, candidate: &str) -> bool {
-        constant_time_eq(self.0.as_bytes(), candidate.as_bytes())
+        self.0.as_bytes().ct_eq(candidate.as_bytes()).into()
     }
 }
 
@@ -228,6 +239,7 @@ pub trait AuthProvider: Send + Sync + 'static {
 pub struct RailwayAuth {
     config: OAuthConfig,
     http: reqwest::Client,
+    jwks: Jwks,
 }
 
 impl RailwayAuth {
@@ -241,8 +253,15 @@ impl RailwayAuth {
             ))
             .build()
             .context("could not build the OAuth HTTP client")?;
+        let jwks = Jwks::new(
+            config
+                .issuer
+                .join("oauth/jwks")
+                .context("issuer does not join to a jwks URL")?,
+            http.clone(),
+        );
 
-        Ok(Self { config, http })
+        Ok(Self { config, http, jwks })
     }
 
     fn endpoint(&self, path: &str) -> Url {
@@ -284,7 +303,22 @@ impl RailwayAuth {
             )
         })?;
 
-        Ok(wire.into_token_set(Utc::now()))
+        let tokens = wire.into_token_set(Utc::now());
+
+        if let Some(id_token) = &tokens.id_token {
+            let claims = self
+                .jwks
+                .verify(
+                    id_token.expose(),
+                    self.config.issuer.as_str().trim_end_matches('/'),
+                    &self.config.client_id,
+                )
+                .await?;
+
+            tracing::debug!(subject = %claims.sub, "id token verified");
+        }
+
+        Ok(tokens)
     }
 }
 
@@ -405,24 +439,6 @@ fn token_error(status: reqwest::StatusCode, body: &[u8]) -> AuthError {
     }
 }
 
-fn random_token() -> String {
-    let mut bytes = [0u8; ENTROPY_BYTES];
-    rand::fill(&mut bytes);
-
-    URL_SAFE_NO_PAD.encode(bytes)
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-
-    left.iter()
-        .zip(right)
-        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
-        == 0
-}
-
 #[cfg(test)]
 mod tests {
     use std::{
@@ -434,7 +450,7 @@ mod tests {
 
     use super::{
         AuthError, AuthProvider, CsrfState, OAuthConfig, Pkce, RailwayAuth, RailwayIdentity,
-        Secret, TokenResponse, token_error,
+        Secret, TimeDelta, TokenResponse, Utc, token_error,
     };
     use crate::{error::ApiError, extract::Json};
 
@@ -454,9 +470,67 @@ mod tests {
         }
     }
 
-    /// Serves `router` on an ephemeral port and points a provider at it, so the
-    /// HTTP paths are exercised without a network or a real OAuth app.
-    async fn provider_serving(router: Router) -> RailwayAuth {
+    /// A throwaway P-256 key pair, generated for these tests and used nowhere
+    /// else. The JWK below is its public half.
+    const TEST_KEY_PEM: &str = concat!(
+        "-----BEGIN PRIVATE KEY-----\n",
+        "MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgW0We95djOpUtXi/N\n",
+        "y+mtXpbH60vsPoJ1hYr3LCzzhjihRANCAAQWw91Y5TT2mqXndrhlwJETEXe7Yh1d\n",
+        "UtqRI4EPdfrlMvV+wBg6HPr01QBxVNwvpcj2KW1tTv6WRiRVsgAD7ql9\n",
+        "-----END PRIVATE KEY-----\n",
+    );
+    const TEST_KID: &str = "test-key";
+    const TEST_JWK_X: &str = "FsPdWOU09pql53a4ZcCRExF3u2IdXVLakSOBD3X65TI";
+    const TEST_JWK_Y: &str = "9X7AGDoc-vTVAHFU3C-lyPYpbW1O_pZGJFWyAAPuqX0";
+
+    /// Every test provider publishes the key above, so a token signed with
+    /// [`id_token`] verifies exactly as a real one would.
+    fn jwks_route() -> Router {
+        Router::new().route(
+            "/oauth/jwks",
+            get(|| async {
+                Json(serde_json::json!({
+                    "keys": [{
+                        "kty": "EC",
+                        "use": "sig",
+                        "alg": "ES256",
+                        "crv": "P-256",
+                        "kid": TEST_KID,
+                        "x": TEST_JWK_X,
+                        "y": TEST_JWK_Y,
+                    }],
+                }))
+            }),
+        )
+    }
+
+    fn signed_id_token(kid: &str, issuer: &str, audience: &str, lifetime: TimeDelta) -> String {
+        let mut header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::ES256);
+        header.kid = Some(kid.to_owned());
+
+        let now = Utc::now();
+        let claims = serde_json::json!({
+            "sub": "user_stub",
+            "iss": issuer,
+            "aud": audience,
+            "iat": now.timestamp(),
+            "exp": (now + lifetime).timestamp(),
+        });
+
+        jsonwebtoken::encode(
+            &header,
+            &claims,
+            &jsonwebtoken::EncodingKey::from_ec_pem(TEST_KEY_PEM.as_bytes())
+                .expect("test key should parse"),
+        )
+        .expect("test token should sign")
+    }
+
+    /// Serves `build`'s router on an ephemeral port and points a provider at
+    /// it, so the HTTP paths are exercised without a network or a real OAuth
+    /// app. The router is built from the issuer because an ID token has to
+    /// claim it.
+    async fn provider_serving(build: impl FnOnce(&str) -> Router) -> RailwayAuth {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("should bind an ephemeral port");
@@ -464,6 +538,7 @@ mod tests {
             "http://{}/",
             listener.local_addr().expect("should have an addr")
         );
+        let router = build(issuer.trim_end_matches('/')).merge(jwks_route());
 
         tokio::spawn(async move {
             axum::serve(listener, router).await.ok();
@@ -472,11 +547,20 @@ mod tests {
         RailwayAuth::new(config(&issuer)).expect("client should build")
     }
 
-    fn token_body() -> serde_json::Value {
+    fn token_body(issuer: &str) -> serde_json::Value {
+        token_body_with(signed_id_token(
+            TEST_KID,
+            issuer,
+            "client-id",
+            TimeDelta::hours(1),
+        ))
+    }
+
+    fn token_body_with(id_token: String) -> serde_json::Value {
         serde_json::json!({
             "access_token": "access-123",
             "refresh_token": "refresh-123",
-            "id_token": "id-123",
+            "id_token": id_token,
             "token_type": "Bearer",
             "expires_in": 3600,
             "scope": "openid project:member",
@@ -557,8 +641,8 @@ mod tests {
     #[test]
     fn relative_expiry_becomes_absolute() {
         let now = chrono::Utc::now();
-        let response: TokenResponse =
-            serde_json::from_value(token_body()).expect("body should deserialize");
+        let response: TokenResponse = serde_json::from_value(token_body("https://issuer.test"))
+            .expect("body should deserialize");
 
         let tokens = response.into_token_set(now);
 
@@ -575,7 +659,7 @@ mod tests {
 
     #[test]
     fn a_token_set_never_debug_prints_its_tokens() {
-        let tokens = serde_json::from_value::<TokenResponse>(token_body())
+        let tokens = serde_json::from_value::<TokenResponse>(token_body("https://issuer.test"))
             .expect("body should deserialize")
             .into_token_set(chrono::Utc::now());
 
@@ -642,22 +726,25 @@ mod tests {
         let seen = Arc::new(Mutex::new(None));
         let captured = Arc::clone(&seen);
 
-        let router = Router::new().route(
-            "/oauth/token",
-            axum::routing::post(move |headers: HeaderMap, body: String| {
-                let captured = Arc::clone(&captured);
-                async move {
-                    *captured.lock().expect("lock") = Some((headers, body));
-                    Json(token_body())
-                }
-            }),
-        );
+        let tokens = provider_serving(|issuer| {
+            let body = token_body(issuer);
 
-        let tokens = provider_serving(router)
-            .await
-            .exchange_code("code-abc", &Pkce::from_verifier(RFC_VERIFIER))
-            .await
-            .expect("exchange should succeed");
+            Router::new().route(
+                "/oauth/token",
+                axum::routing::post(move |headers: HeaderMap, request: String| {
+                    let captured = Arc::clone(&captured);
+                    let body = body.clone();
+                    async move {
+                        *captured.lock().expect("lock") = Some((headers, request));
+                        Json(body)
+                    }
+                }),
+            )
+        })
+        .await
+        .exchange_code("code-abc", &Pkce::from_verifier(RFC_VERIFIER))
+        .await
+        .expect("exchange should succeed");
 
         assert_eq!(tokens.access_token.expose(), "access-123");
 
@@ -681,6 +768,111 @@ mod tests {
         );
     }
 
+    /// Runs a token exchange whose ID token is whatever `make` builds, and
+    /// returns the failure.
+    async fn rejected_id_token(make: impl FnOnce(&str) -> String) -> AuthError {
+        provider_serving(|issuer| {
+            let body = token_body_with(make(issuer));
+
+            Router::new().route(
+                "/oauth/token",
+                axum::routing::post(move || {
+                    let body = body.clone();
+                    async move { Json(body) }
+                }),
+            )
+        })
+        .await
+        .exchange_code("code-abc", &Pkce::from_verifier(RFC_VERIFIER))
+        .await
+        .expect_err("verification should have failed")
+    }
+
+    fn assert_invalid_id_token(error: &AuthError) {
+        assert!(
+            matches!(error, AuthError::InvalidIdToken(_)),
+            "got {error:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_tampered_signature_is_rejected() {
+        let error = rejected_id_token(|issuer| {
+            let token = signed_id_token(TEST_KID, issuer, "client-id", TimeDelta::hours(1));
+            let (body, signature) = token.rsplit_once('.').expect("a jwt has three parts");
+            let flipped = if signature.starts_with('A') { 'B' } else { 'A' };
+
+            format!("{body}.{flipped}{}", &signature[1..])
+        })
+        .await;
+
+        assert_invalid_id_token(&error);
+    }
+
+    #[tokio::test]
+    async fn a_token_for_another_audience_is_rejected() {
+        let error = rejected_id_token(|issuer| {
+            signed_id_token(
+                TEST_KID,
+                issuer,
+                "someone-elses-client",
+                TimeDelta::hours(1),
+            )
+        })
+        .await;
+
+        assert_invalid_id_token(&error);
+    }
+
+    #[tokio::test]
+    async fn a_token_from_another_issuer_is_rejected() {
+        let error = rejected_id_token(|_| {
+            signed_id_token(
+                TEST_KID,
+                "https://evil.test",
+                "client-id",
+                TimeDelta::hours(1),
+            )
+        })
+        .await;
+
+        assert_invalid_id_token(&error);
+    }
+
+    #[tokio::test]
+    async fn an_expired_token_is_rejected() {
+        let error = rejected_id_token(|issuer| {
+            signed_id_token(TEST_KID, issuer, "client-id", TimeDelta::hours(-1))
+        })
+        .await;
+
+        assert_invalid_id_token(&error);
+    }
+
+    /// The provider publishes no key under this `kid`, so the refetch finds
+    /// nothing and the login fails rather than being accepted unverified.
+    #[tokio::test]
+    async fn a_token_signed_under_an_unpublished_kid_is_rejected() {
+        let error = rejected_id_token(|issuer| {
+            signed_id_token("not-published", issuer, "client-id", TimeDelta::hours(1))
+        })
+        .await;
+
+        assert_invalid_id_token(&error);
+    }
+
+    /// A failed verification is the caller's problem, not an outage: it must
+    /// not read as a retryable `503`.
+    #[test]
+    fn an_unverifiable_id_token_is_a_bad_request() {
+        use axum::http::StatusCode;
+
+        assert_eq!(
+            ApiError::from(AuthError::InvalidIdToken(anyhow::anyhow!("bad"))).status(),
+            StatusCode::BAD_REQUEST
+        );
+    }
+
     #[tokio::test]
     async fn a_rejected_grant_is_not_reported_as_an_outage() {
         let router = Router::new().route(
@@ -693,7 +885,7 @@ mod tests {
             }),
         );
 
-        let error = provider_serving(router)
+        let error = provider_serving(|_| router)
             .await
             .exchange_code("stale", &Pkce::generate())
             .await
@@ -723,7 +915,7 @@ mod tests {
             }),
         );
 
-        let identity = provider_serving(router)
+        let identity = provider_serving(|_| router)
             .await
             .identity(&Secret::new("access-123"))
             .await
@@ -756,7 +948,7 @@ mod tests {
             get(|| async { Json(serde_json::json!({ "sub": "user_only" })) }),
         );
 
-        let identity = provider_serving(router)
+        let identity = provider_serving(|_| router)
             .await
             .identity(&Secret::new("access-123"))
             .await

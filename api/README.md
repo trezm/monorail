@@ -19,6 +19,7 @@ The service requires Postgres and refuses to start without it. See
 | `src/config.rs` | Environment parsing. Every setting has a default. |
 | `src/constants.rs` | Environment variable names and their defaults. |
 | `src/db.rs` | The Postgres pool, and the embedded migrations. |
+| `src/schema.rs` | The tables, as diesel sees them. Hand-written. |
 | `src/error.rs` | `ApiError` and the JSON error envelope. |
 | `src/extract.rs` | Extractors that reject with `ApiError`. |
 | `src/state.rs` | `AppState`, one `Arc` around everything shared. |
@@ -138,22 +139,83 @@ It builds every Railway endpoint from the issuer URL in the configuration, so a
 test can point the issuer at a local server and run the whole flow without
 reaching the network.
 
-**ID token signatures.** The service does not verify the ID token's signature,
-and it ships no JWKS client. Two things make that safe. First, the token set
-never passes through the browser: the service fetches it over TLS in a direct
-call to the token endpoint and authenticates itself in that call, which OpenID
-Connect Core §3.1.3.7 exempts from the signature check. Second, the service
-reads the user's identity from the userinfo endpoint, so no code parses the
-JWT.
+**ID token signatures.** Every ID token is verified with `jsonwebtoken`
+against the keys the provider publishes at `{issuer}/oauth/jwks`: signature,
+issuer, audience and expiry. Railway signs with ES256, and the algorithm is
+pinned rather than read from the token's own header, which is how `alg`
+confusion is avoided. [`src/services/jwks.rs`](src/services/jwks.rs) caches the
+keys by `kid` and refetches once on an unknown one, so a key rotation does not
+need a restart.
+
+OpenID Connect Core §3.1.3.7 would let the check be skipped, because the token
+set never passes through the browser — the service fetches it over TLS in a
+direct call to the token endpoint and authenticates itself in that call. It is
+done anyway: it costs one cached key fetch, and it does not rest on that
+argument staying true. Identity itself still comes from the userinfo endpoint.
 
 **Configuration.** The client ID, client secret and redirect URI are
-required. If any of them is missing, the service fails at startup and names the
+required. If any of them is missing, the server fails at startup and names the
 one it wanted. Nothing here works without a login, so there is no mode in which
-the service runs with authentication disabled.
+the server runs with authentication disabled. `OAuthConfig::from_env` is read
+by the server alone — `//api:migrate` needs a database and nothing else, so a
+migration job is never handed credentials it would not send.
 
 **Secrets in logs.** The code wraps tokens and the `state` value in
 [`Secret`](src/secret.rs), or gives them a `Debug` that redacts them. A
 `?config` field, a panic message or an error report therefore cannot print one.
+
+### The flow
+
+| Route | |
+|---|---|
+| `GET /auth/railway` | mints `state` and a PKCE pair, sets the pending cookie, redirects to Railway |
+| `GET /auth/railway/callback` | checks `state`, exchanges the code, reads the identity, opens a session |
+| `DELETE /auth/session` | deletes the session row and clears the cookie |
+| `GET /api/v1/users/me` | the logged-in user, or `401` |
+
+The session is the resource the first three act on. The callback keeps a path of
+its own because it is the redirect URI registered on the OAuth app, which has to
+match byte for byte.
+
+The first three are outside `/api/v1` because they are browser redirects, not a
+versioned API — the same reason `health` is. The profile is the one the UI
+calls, so it is versioned.
+
+Two cookies. The pending cookie carries `state` and the PKCE verifier for the
+ten minutes between the redirect out and the callback back; comparing the
+`state` query parameter against it is the standard double-submit check.
+`SameSite=Lax` is required rather than preferred — the callback is a top-level
+cross-site GET and `Strict` would withhold the cookie exactly when it is needed.
+Neither uses the `__Host-` prefix, which mandates `Secure` and so cannot work
+over the `http://localhost` a local checkout runs on; `Secure` is set everywhere
+except development instead.
+
+A failed login answers on the error envelope rather than redirecting somewhere
+friendlier, so a user who declines consent sees JSON. Swapping that for a
+redirect carrying an error code is the obvious follow-up.
+
+### Sessions
+
+[`src/services/session.rs`](src/services/session.rs) owns them.
+`SessionStore` is the capability, `PgSessionStore` the Postgres implementation,
+and the trait is what lets the route tests run with a `HashMap` and no database.
+
+The cookie holds an opaque token; the `sessions` row holds only its SHA-256
+digest, so a dump of that table yields no usable session. The digest is
+unsalted and unstretched on purpose: the input is 256 bits of uniform
+randomness, so there is no dictionary to defend against and a slow hash would
+tax every authenticated request for nothing. Expiry is checked against the row,
+never the cookie's `Max-Age`, which a client controls.
+
+The Railway access and refresh tokens live in that row, because the point of
+logging in with Railway is to act on Railway afterwards and a one-hour token has
+to outlive the request that fetched it. They are stored in plaintext columns:
+that table is as sensitive as the database, and encrypting the columns is the
+obvious next step. Expired rows are not swept yet either.
+
+`CurrentUser` in [`src/extract.rs`](src/extract.rs) is how an endpoint requires
+a login — it costs one query, and rejects with `401` whether the cookie is
+absent, unknown or expired.
 
 ## Configuration
 

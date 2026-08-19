@@ -10,6 +10,7 @@ pub mod db;
 pub mod error;
 pub mod extract;
 pub mod routes;
+pub mod schema;
 pub mod secret;
 pub mod services;
 pub mod shutdown;
@@ -23,8 +24,8 @@ use axum::{
     Router,
     extract::{DefaultBodyLimit, Request},
     http::{
-        StatusCode,
-        header::{AUTHORIZATION, COOKIE, SET_COOKIE},
+        Method, StatusCode,
+        header::{ACCEPT, AUTHORIZATION, CONTENT_TYPE, COOKIE, SET_COOKIE},
     },
 };
 use std::sync::Arc;
@@ -88,6 +89,7 @@ pub fn app(state: AppState) -> Router {
 
     Router::new()
         .merge(routes::health::router())
+        .merge(routes::auth::router())
         .nest("/api/v1", routes::api_v1())
         .fallback(not_found)
         .layer(middleware)
@@ -103,7 +105,7 @@ pub fn app(state: AppState) -> Router {
 /// Migrations are not run here — that is `//api:migrate`.
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.host, config.port));
-    let oauth = config.railway_oauth.clone();
+    let oauth = config::OAuthConfig::from_env()?;
     tracing::info!(issuer = %oauth.issuer, scopes = ?oauth.scopes, "Railway login enabled");
     let state = AppState::new(config, Arc::new(RailwayAuth::new(oauth)?));
 
@@ -152,17 +154,20 @@ fn make_span<B>(request: &Request<B>) -> Span {
     )
 }
 
+/// An explicit origin list also allows credentials, which is what lets a
+/// browser on another origin send the session cookie. That forces the methods
+/// and headers to be enumerated: the CORS specification forbids pairing
+/// credentials with a wildcard, and tower-http enforces it by panicking. The
+/// wildcard branch therefore stays credential-free, and is only useful for an
+/// API called without cookies.
 fn cors(config: &Config) -> CorsLayer {
     use config::CorsOrigins;
 
-    let layer = CorsLayer::new()
-        .allow_methods(Any)
-        .allow_headers(Any)
-        .max_age(Duration::from_secs(60 * 60));
+    let base = CorsLayer::new().max_age(Duration::from_secs(60 * 60));
 
     match &config.cors_origins {
         CorsOrigins::Disabled => CorsLayer::new(),
-        CorsOrigins::Any => layer.allow_origin(Any),
+        CorsOrigins::Any => base.allow_origin(Any).allow_methods(Any).allow_headers(Any),
         CorsOrigins::List(origins) => {
             let parsed: Vec<_> = origins
                 .iter()
@@ -175,7 +180,16 @@ fn cors(config: &Config) -> CorsLayer {
                 })
                 .collect();
 
-            layer.allow_origin(parsed)
+            base.allow_origin(parsed)
+                .allow_credentials(true)
+                .allow_methods([
+                    Method::DELETE,
+                    Method::GET,
+                    Method::PATCH,
+                    Method::POST,
+                    Method::PUT,
+                ])
+                .allow_headers([ACCEPT, AUTHORIZATION, CONTENT_TYPE])
         }
     }
 }
