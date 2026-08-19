@@ -234,8 +234,7 @@ impl SessionStore for MemorySessions {
 /// The router with a login that works, and sessions that do not need a database.
 fn app_with_login() -> (Router, Arc<MemorySessions>) {
     let sessions = Arc::new(MemorySessions::default());
-    let state =
-        AppState::new(test_config(), Arc::new(StubAuth)).with_sessions(sessions.clone());
+    let state = AppState::new(test_config(), Arc::new(StubAuth)).with_sessions(sessions.clone());
 
     (monorail_api::app(state), sessions)
 }

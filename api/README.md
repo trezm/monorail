@@ -139,13 +139,19 @@ It builds every Railway endpoint from the issuer URL in the configuration, so a
 test can point the issuer at a local server and run the whole flow without
 reaching the network.
 
-**ID token signatures.** The service does not verify the ID token's signature,
-and it ships no JWKS client. Two things make that safe. First, the token set
-never passes through the browser: the service fetches it over TLS in a direct
-call to the token endpoint and authenticates itself in that call, which OpenID
-Connect Core §3.1.3.7 exempts from the signature check. Second, the service
-reads the user's identity from the userinfo endpoint, so no code parses the
-JWT.
+**ID token signatures.** Every ID token is verified with `jsonwebtoken`
+against the keys the provider publishes at `{issuer}/oauth/jwks`: signature,
+issuer, audience and expiry. Railway signs with ES256, and the algorithm is
+pinned rather than read from the token's own header, which is how `alg`
+confusion is avoided. [`src/services/jwks.rs`](src/services/jwks.rs) caches the
+keys by `kid` and refetches once on an unknown one, so a key rotation does not
+need a restart.
+
+OpenID Connect Core §3.1.3.7 would let the check be skipped, because the token
+set never passes through the browser — the service fetches it over TLS in a
+direct call to the token endpoint and authenticates itself in that call. It is
+done anyway: it costs one cached key fetch, and it does not rest on that
+argument staying true. Identity itself still comes from the userinfo endpoint.
 
 **Configuration.** The client ID, client secret and redirect URI are
 required. If any of them is missing, the service fails at startup and names the
