@@ -1,7 +1,9 @@
 # monorail
 
-A Bazel monorepo. Currently one service: [`api/`](api) — a Rust/axum HTTP API
-backed by Postgres.
+A Bazel monorepo:
+
+- [`api/`](api) — a Rust/axum HTTP API backed by Postgres, with Railway OAuth login.
+- [`ui/`](ui) — an Astro + React front end.
 
 ## Prerequisites
 
@@ -15,16 +17,21 @@ brew install bazelisk
 Docker is needed for the local database; anything that provides
 `docker compose` will do.
 
-Nothing else is required. A local Rust toolchain is optional — Bazel downloads
-its own, pinned in `MODULE.bazel`.
+Nothing else is required. Local Rust and Node toolchains are optional — Bazel
+downloads its own of each, both pinned in `MODULE.bazel`. A local
+[pnpm](https://pnpm.io) is only wanted for changing JavaScript dependencies or
+running `astro` outside Bazel.
 
 ## Everyday commands
 
 ```bash
 tools/stack.sh up          # Postgres on :5432, then the API on :8080
+tools/stack.sh ui          # the UI on :4321
 bazel build //...          # build everything
 bazel test //...           # run every test
 bazel run //api            # run the API on :8080
+bazel run //ui:dev         # run the UI on :4321
+bazel build //ui           # the static site into bazel-bin/ui/dist
 bazel build //:clippy      # lint
 bazel test //:rustfmt      # check formatting
 ```
@@ -48,11 +55,16 @@ bazel build --config=release //api
 ```bash
 tools/stack.sh up      # Postgres, migrations, then the API in the foreground
 tools/stack.sh db      # Postgres alone — run the API yourself
+tools/stack.sh ui      # the Astro dev server, in another terminal
 tools/stack.sh migrate # apply pending migrations and exit
 tools/stack.sh down    # stop Postgres; the data volume survives
 tools/stack.sh reset   # stop Postgres and delete the data volume
 tools/stack.sh psql    # a shell on the running database
 ```
+
+Logging in needs an OAuth app registered with Railway; see
+[`api/README.md`](api/README.md#authentication). Without one the API still runs
+and the login routes answer `503`.
 
 Only the database is containerized ([`compose.yaml`](compose.yaml)). The API
 runs on the host out of `bazel run //api`, because building Rust in a container
@@ -178,6 +190,8 @@ parallel.
 
 ## Adding or changing dependencies
 
+### Rust
+
 Edit `[workspace.dependencies]` in the root `Cargo.toml` and reference it from
 the member crate, then re-pin:
 
@@ -185,6 +199,20 @@ the member crate, then re-pin:
 cargo update -p <crate>            # refresh Cargo.lock
 CARGO_BAZEL_REPIN=1 bazel mod deps # refresh the Bazel resolution
 ```
+
+### JavaScript
+
+`pnpm-workspace.yaml` and `pnpm-lock.yaml` at the root are the counterpart to
+the Cargo manifests, and `rules_js` reads the lockfile directly — so there is no
+repin step:
+
+```bash
+pnpm --filter ui add <package>
+```
+
+Commit the rewritten `pnpm-lock.yaml`. `pnpm install` materialises a
+`node_modules/` for the editor; the Bazel build makes its own and ignores that
+one.
 
 ## Adding a crate
 

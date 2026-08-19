@@ -21,11 +21,13 @@ doc comment. Existing comments stay; this applies to new code.
 
 ```
 Cargo.toml           Workspace root. Single source of truth for dependencies.
-MODULE.bazel         bzlmod: rules_rust, toolchain, crate_universe.
+MODULE.bazel         bzlmod: rules_rust, rules_js, toolchains, crate_universe.
 .bazelrc             Cross-worktree caches, --config=release, --config=verbose.
 clippy.toml          Repo-wide lint policy (disallowed types).
 BUILD.bazel          //:clippy and //:rustfmt over every Rust target.
-api/                 The one service so far: Rust/axum HTTP API.
+api/                 Rust/axum HTTP API.
+ui/                  Astro + React front end.
+pnpm-workspace.yaml  JS workspace root. pnpm-lock.yaml is the dependency truth.
 scripts/             rust-analyzer Bazel project discovery.
 tools/cache.sh       Report/prune Bazel output bases across worktrees.
 ```
@@ -45,6 +47,7 @@ Bazel is the build system; Cargo is an escape hatch that must keep working.
 bazel build //...                  # build everything
 bazel test //...                   # every test
 bazel run //api                    # serve on :8080
+bazel run //ui:dev                 # serve the UI on :4321
 bazel build //:clippy              # lint
 bazel test //:rustfmt              # format check
 bazel run @rules_rust//tools/rustfmt  # format in place
@@ -68,6 +71,9 @@ A new crate needs a `BUILD.bazel` (copy `api/BUILD.bazel`), a `members` entry,
 and a repin. Keep the Bazel target name equal to the Cargo package name —
 `rules_rust` derives `CARGO_PKG_NAME` from it — and set `version` explicitly.
 
+JavaScript dependencies go through pnpm instead — `pnpm --filter ui add <pkg>` —
+and need no repin: `rules_js` reads `pnpm-lock.yaml` directly.
+
 ## Conventions
 
 - Handlers return `ApiResult<T>`; every failure serializes to the
@@ -86,3 +92,5 @@ and a repin. Keep the Bazel target name equal to the Cargo package name —
   router in-process in `api/tests/api.rs`. Prefer the latter for anything
   touching HTTP.
 - `unsafe_code` is forbidden; clippy runs at `pedantic`.
+- Browser-facing routes live outside `/api/v1`, like `health`; JSON the UI
+  calls is versioned. `CurrentUser` in `extract.rs` is what requires a login.
