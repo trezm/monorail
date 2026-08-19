@@ -10,15 +10,31 @@ exports_files(["Cargo.toml"])
 # CARGO_PKG_NAME, so it matches the Cargo package name to keep `env!` output
 # identical under both build systems. Same reason `version` is set explicitly:
 # rules_rust defaults CARGO_PKG_VERSION to "0.0.0".
+
+# `diesel_migrations::embed_migrations!` reads the .sql files while rustc runs,
+# so they have to be inputs (compile_data) and it has to be able to find them.
+# The macro resolves them as $CARGO_MANIFEST_DIR/migrations; Cargo exports that
+# variable and Bazel does not, so rustc_env supplies it. rustc runs with the
+# execroot as its working directory, which makes the package path the right
+# value.
+MIGRATIONS = glob(["migrations/**/*.sql"])
+
+MIGRATIONS_ENV = {"CARGO_MANIFEST_DIR": "api"}
+
 rust_library(
     name = "monorail-api",
     srcs = glob(
         ["src/**/*.rs"],
-        exclude = ["src/main.rs"],
+        exclude = [
+            "src/main.rs",
+            "src/bin/**",
+        ],
     ),
+    compile_data = MIGRATIONS,
     crate_name = "monorail_api",
     edition = "2024",
     proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = MIGRATIONS_ENV,
     version = "0.1.0",
     deps = all_crate_deps(normal = True),
 )
@@ -33,13 +49,27 @@ rust_binary(
 )
 
 # `crate = ":monorail-api"` compiles the library again with `--test`, which is
-# how the `#[cfg(test)]` modules inside src/ get run.
+# how the `#[cfg(test)]` modules inside src/ get run. That re-expands
+# embed_migrations!, so it needs the same inputs and environment the library
+# gets.
 rust_test(
     name = "unit_tests",
     size = "small",
+    compile_data = MIGRATIONS,
     crate = ":monorail-api",
     proc_macro_deps = all_crate_deps(proc_macro_dev = True),
+    rustc_env = MIGRATIONS_ENV,
     deps = all_crate_deps(normal_dev = True),
+)
+
+# Applying migrations is a job, not a startup hook: `bazel run //api:migrate`.
+rust_binary(
+    name = "migrate",
+    srcs = ["src/bin/migrate.rs"],
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    version = "0.1.0",
+    deps = all_crate_deps(normal = True) + [":monorail-api"],
 )
 
 rust_test(

@@ -13,7 +13,7 @@ use axum::{
 use http_body_util::BodyExt as _;
 use monorail_api::{
     AppState,
-    config::{Config, CorsOrigins, Environment, LogFormat},
+    config::{Config, CorsOrigins, DatabaseUrl, Environment, LogFormat},
 };
 use serde_json::Value;
 use tower::ServiceExt as _;
@@ -28,6 +28,13 @@ fn test_config() -> Config {
         request_timeout: std::time::Duration::from_secs(5),
         body_limit_bytes: 64 * 1024,
         cors_origins: CorsOrigins::Disabled,
+        // Deliberately unreachable, and port 1 refuses immediately rather than
+        // hanging. The pool connects lazily, so building the state costs
+        // nothing and only a test that queries pays for this — which is exactly
+        // what `readiness_reports_unavailable_without_a_database` asserts.
+        database_url: DatabaseUrl::new("postgres://unused@127.0.0.1:1/unused"),
+        database_pool_size: 1,
+        database_connect_timeout: std::time::Duration::from_millis(50),
     }
 }
 
@@ -71,12 +78,14 @@ async fn liveness_reports_ok() {
     assert!(body["version"].is_string());
 }
 
+/// Readiness round-trips a real query, so with no database it must fail — and
+/// fail as a `503` on the standard envelope rather than a `500` or a panic.
 #[tokio::test]
-async fn readiness_reports_ready() {
+async fn readiness_reports_unavailable_without_a_database() {
     let (status, body) = send(&app(), get("/health/ready")).await;
 
-    assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["status"], "ready");
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["error"]["code"], "service_unavailable");
 }
 
 #[tokio::test]

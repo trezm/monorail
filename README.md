@@ -1,6 +1,7 @@
 # monorail
 
-A Bazel monorepo. Currently one service: [`api/`](api) — a Rust/axum HTTP API.
+A Bazel monorepo. Currently one service: [`api/`](api) — a Rust/axum HTTP API
+backed by Postgres.
 
 ## Prerequisites
 
@@ -11,12 +12,16 @@ only need the launcher:
 brew install bazelisk
 ```
 
+Docker is needed for the local database; anything that provides
+`docker compose` will do.
+
 Nothing else is required. A local Rust toolchain is optional — Bazel downloads
 its own, pinned in `MODULE.bazel`.
 
 ## Everyday commands
 
 ```bash
+tools/stack.sh up          # Postgres on :5432, then the API on :8080
 bazel build //...          # build everything
 bazel test //...           # run every test
 bazel run //api            # run the API on :8080
@@ -35,6 +40,33 @@ Optimized build:
 ```bash
 bazel build --config=release //api
 ```
+
+## Local stack
+
+[`tools/stack.sh`](tools/stack.sh) runs Postgres and the API together.
+
+```bash
+tools/stack.sh up      # Postgres, migrations, then the API in the foreground
+tools/stack.sh db      # Postgres alone — run the API yourself
+tools/stack.sh migrate # apply pending migrations and exit
+tools/stack.sh down    # stop Postgres; the data volume survives
+tools/stack.sh reset   # stop Postgres and delete the data volume
+tools/stack.sh psql    # a shell on the running database
+```
+
+Only the database is containerized ([`compose.yaml`](compose.yaml)). The API
+runs on the host out of `bazel run //api`, because building Rust in a container
+costs a full non-incremental compile on every edit — minutes against Bazel's
+seconds — and gains nothing while there is no container packaging to test
+against. `up` also runs `bazel run //api:migrate` first; the server itself never
+migrates on startup.
+
+Ctrl-C stops the API and leaves Postgres running; `down` stops that too. The
+API's development defaults already point at this database, so there is nothing
+to configure or export.
+
+The compose project name is fixed, so every worktree shares one database rather
+than fighting over port 5432.
 
 ## Worktrees and disk usage
 

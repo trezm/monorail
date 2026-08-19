@@ -1,0 +1,16 @@
+# Read by diesel-cli only. The service embeds `migrations/` at compile time and
+# applies it through diesel-async, so nothing at runtime depends on this file or
+# on diesel-cli being installed.
+#
+#     cargo install diesel_cli --no-default-features --features postgres
+#     cd api && diesel migration generate <name>
+#
+# `diesel migration run` and `diesel print-schema` need libpq and a reachable
+# database; generating the files does not.
+
+[print_schema]
+file = "src/schema.rs"
+custom_type_derives = ["diesel::query_builder::QueryId", "Clone"]
+
+[migrations_directory]
+dir = "migrations"

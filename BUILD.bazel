@@ -16,6 +16,7 @@ rust_clippy(
     deps = [
         "//api:api",
         "//api:integration_tests",
+        "//api:migrate",
         "//api:monorail-api",
         "//api:unit_tests",
     ],
@@ -28,6 +29,7 @@ rustfmt_test(
     size = "small",
     targets = [
         "//api:api",
+        "//api:migrate",
         "//api:monorail-api",
     ],
 )
