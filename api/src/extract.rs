@@ -22,10 +22,8 @@ use axum_extra::extract::cookie::CookieJar;
 use serde::Serialize;
 
 use crate::{
-    error::ApiError,
-    routes::auth::SESSION_COOKIE,
-    services::session::{SessionToken, User},
-    state::AppState,
+    dao::users::User, error::ApiError, routes::auth::SESSION_COOKIE,
+    services::session::SessionToken, state::AppState,
 };
 
 #[derive(Debug, Clone, Copy, Default, FromRequest)]

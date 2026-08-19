@@ -80,6 +80,7 @@ impl From<ContainerManagerError> for ApiError {
 /// `#[async_trait]` boxes the returned futures so the trait stays
 /// dyn-compatible: implementations are held as `Box<dyn ContainerManager>`
 /// (or `Arc<..>`) and chosen at runtime.
+#[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 pub trait ContainerManager: Send + Sync + 'static {
     /// Provisions a container for the repository at `github_url`, returning the
