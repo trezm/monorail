@@ -12,6 +12,8 @@ RUST_EDITION = "2024"
 RUST_VERSION = "1.95.0"
 
 bazel_dep(name = "rules_rust", version = "0.73.0")
+bazel_dep(name = "aspect_rules_js", version = "3.4.0")
+bazel_dep(name = "rules_nodejs", version = "6.7.5")
 
 rust = use_extension("@rules_rust//rust:extensions.bzl", "rust")
 rust.toolchain(
@@ -37,3 +39,37 @@ crate.from_cargo(
     manifests = ["//:Cargo.toml"],
 )
 use_repo(crate, "crates")
+
+# Node, pinned the same way the Rust toolchain is, so the version that builds
+# //ui does not depend on what is on the developer's PATH.
+NODE_VERSION = "24.14.0"
+
+node = use_extension("@rules_nodejs//nodejs:extensions.bzl", "node")
+node.toolchain(node_version = NODE_VERSION)
+use_repo(node, "nodejs_toolchains")
+
+register_toolchains("@nodejs_toolchains//:all")
+
+# The JavaScript counterpart to crate.from_cargo: pnpm-lock.yaml is the single
+# source of truth and Bazel mirrors it. After changing any dependency:
+#
+#     pnpm install
+#
+# which rewrites the lockfile; Bazel picks it up on the next build.
+npm = use_extension("@aspect_rules_js//npm:extensions.bzl", "npm")
+npm.npm_translate_lock(
+    name = "npm",
+    data = [
+        "//:package.json",
+        "//:pnpm-workspace.yaml",
+        "//ui:package.json",
+    ],
+    pnpm_lock = "//:pnpm-lock.yaml",
+    # Guards against a stray node_modules in the source tree shadowing the one
+    # Bazel materialises.
+    verify_node_modules_ignored = "//:.bazelignore",
+)
+use_repo(npm, "npm")
+
+pnpm = use_extension("@aspect_rules_js//npm:extensions.bzl", "pnpm")
+use_repo(pnpm, "pnpm")

@@ -9,6 +9,12 @@
 /rust-project.json
 /.rules_rust_analyzer/
 
+# JavaScript. Bazel materialises its own node_modules under bazel-out; these
+# are what `pnpm install` writes for the dev server and the editor.
+node_modules/
+/ui/dist/
+/ui/.astro/
+
 # Cargo output. Should be empty when CARGO_TARGET_DIR is set (see .envrc);
 # ignored anyway so a stray build cannot be committed.
 /target

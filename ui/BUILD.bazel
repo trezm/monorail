@@ -1,0 +1,63 @@
+load("@aspect_rules_js//js:defs.bzl", "js_run_devserver")
+load("@npm//:defs.bzl", "npm_link_all_packages")
+load("@npm//ui:astro/package_json.bzl", astro_bin = "bin")
+
+package(default_visibility = ["//visibility:public"])
+
+# npm_translate_lock reads this.
+exports_files(["package.json"])
+
+npm_link_all_packages(name = "node_modules")
+
+SRCS = [
+    "astro.config.mjs",
+    "package.json",
+    "tsconfig.json",
+] + glob([
+    "public/**",
+    "src/**",
+])
+
+DEPS = [
+    ":node_modules/@astrojs/react",
+    ":node_modules/astro",
+    ":node_modules/react",
+    ":node_modules/react-dom",
+]
+
+# `bazel build //ui` produces the static site.
+#
+# Astro writes its generated types and its Vite cache next to the sources,
+# which are read-only inside the sandbox, so both are redirected into the
+# node_modules tree Bazel materialised. astro.config.mjs reads these.
+astro_bin.astro(
+    name = "ui",
+    srcs = SRCS + DEPS,
+    args = ["build"],
+    chdir = package_name(),
+    env = {
+        "ASTRO_CACHE_DIR": "node_modules/.astro",
+        "ASTRO_OUT_DIR": "dist",
+    },
+    out_dirs = ["dist"],
+)
+
+astro_bin.astro_binary(
+    name = "astro",
+    chdir = package_name(),
+)
+
+# `bazel run //ui:dev` serves on :4321 with hot reload.
+#
+# Astro 7 daemonizes `astro dev` whenever stdout is not a TTY and returns
+# immediately, which would leave js_run_devserver tearing down the sandbox out
+# from under the server it just started. ASTRO_DEV_BACKGROUND is the flag Astro
+# sets on the child it spawns for itself, and it is what keeps the server in the
+# foreground here.
+js_run_devserver(
+    name = "dev",
+    args = ["dev"],
+    data = SRCS + DEPS,
+    env = {"ASTRO_DEV_BACKGROUND": "1"},
+    tool = ":astro",
+)

@@ -1,2 +1,5 @@
 .claude/worktrees
 target
+node_modules
+ui/node_modules
+ui/dist
