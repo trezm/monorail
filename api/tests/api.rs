@@ -28,6 +28,9 @@ fn test_config() -> Config {
         request_timeout: std::time::Duration::from_secs(5),
         body_limit_bytes: 64 * 1024,
         cors_origins: CorsOrigins::Disabled,
+        // Unreachable on purpose: nothing in these tests should call out.
+        railway_endpoint: "http://127.0.0.1:1/graphql".to_owned(),
+        railway_timeout: std::time::Duration::from_secs(1),
     }
 }
 

@@ -2,26 +2,53 @@
 //!
 //! Railway deploys a service straight from a GitHub repository, which lines up
 //! with what [`ServiceManager`] asks for, and groups those deployments into
-//! projects, which is what [`ProjectManager`] asks for. The client is a stub:
-//! it holds no state and every method is unimplemented.
+//! projects, which is what [`ProjectManager`] asks for.
+//!
+//! Railway's public API is GraphQL, so this holds the HTTP client that will
+//! carry those queries, plus the endpoint and per-request timeout it is
+//! configured with. The trait methods are still unimplemented.
+
+use std::time::Duration;
 
 use crate::services::{
     project::{Project, ProjectId, ProjectManager, ProjectResult},
     service::{ServiceId, ServiceManager, ServiceResult},
 };
 
-/// Talks to the Railway API on our behalf.
+/// Talks to the Railway GraphQL API on our behalf.
 ///
-/// Empty for now. Credentials and an HTTP client will land here, which is why
-/// it is constructed through [`Railway::new`] rather than as a bare literal —
-/// callers will not have to change when it gains fields.
-#[derive(Debug, Clone, Default)]
-pub struct Railway;
+/// `reqwest::Client` owns the connection pool, so this is cheap to clone and
+/// expensive to rebuild — construct it once and share it.
+#[derive(Debug, Clone)]
+pub struct Railway {
+    http: reqwest::Client,
+    endpoint: String,
+}
 
 impl Railway {
+    /// Both arguments come from [`Config`](crate::config::Config)
+    /// (`railway_endpoint` and `railway_timeout`), so they are set by
+    /// `API_RAILWAY_ENDPOINT` and `API_RAILWAY_TIMEOUT_SECS`.
+    ///
+    /// # Errors
+    ///
+    /// Fails if the TLS backend cannot be initialised, which in practice means
+    /// a broken build rather than anything recoverable at runtime.
+    pub fn new(endpoint: impl Into<String>, timeout: Duration) -> reqwest::Result<Self> {
+        Ok(Self {
+            http: reqwest::Client::builder().timeout(timeout).build()?,
+            endpoint: endpoint.into(),
+        })
+    }
+
     #[must_use]
-    pub fn new() -> Self {
-        Self
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    #[must_use]
+    pub fn http(&self) -> &reqwest::Client {
+        &self.http
     }
 }
 

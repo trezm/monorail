@@ -106,6 +106,10 @@ pub struct Config {
     /// Maximum accepted request body size, in bytes.
     pub body_limit_bytes: usize,
     pub cors_origins: CorsOrigins,
+    /// Where the Railway client sends its GraphQL requests.
+    pub railway_endpoint: String,
+    /// Per-request budget for a single call to Railway.
+    pub railway_timeout: Duration,
 }
 
 impl Config {
@@ -141,6 +145,14 @@ impl Config {
                 constants::BODY_LIMIT_BYTES,
                 constants::DEFAULT_BODY_LIMIT_BYTES,
             )?,
+            railway_endpoint: parsed(
+                constants::RAILWAY_ENDPOINT,
+                constants::DEFAULT_RAILWAY_ENDPOINT.to_owned(),
+            )?,
+            railway_timeout: Duration::from_secs(parsed(
+                constants::RAILWAY_TIMEOUT_SECS,
+                constants::DEFAULT_RAILWAY_TIMEOUT_SECS,
+            )?),
             cors_origins: match cors.as_str() {
                 "" => CorsOrigins::Disabled,
                 "*" => CorsOrigins::Any,
