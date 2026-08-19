@@ -1,9 +1,6 @@
 import { useState } from 'react';
 
-// Only reached by a plain `pnpm dev` with no `.env`. Every Bazel build is
-// given the value, and one given an empty value fails in astro.config.mjs
-// rather than shipping this.
-const API_URL = import.meta.env.PUBLIC_API_URL ?? 'http://localhost:8080';
+import { API_URL, useSession } from '../lib/session';
 
 /**
  * Starts the Railway login.
@@ -13,9 +10,15 @@ const API_URL = import.meta.env.PUBLIC_API_URL ?? 'http://localhost:8080';
  * keeps middle-click, keyboard activation and the status bar working. The
  * component is interactive only to acknowledge the click, since the redirect
  * itself takes a moment.
+ *
+ * Nothing renders until the session is known, so an already signed-in visitor
+ * — which is where the callback lands them — is never offered a second login.
  */
 export default function LoginButton() {
+  const session = useSession();
   const [redirecting, setRedirecting] = useState(false);
+
+  if (!session.isSignedOut()) return null;
 
   return (
     <a

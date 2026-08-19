@@ -7,14 +7,18 @@ bazel run //ui:dev     # http://localhost:4321
 bazel build //ui       # static site into bazel-bin/ui/dist
 ```
 
-One page so far — a Login with Railway button.
+One page so far — a Login with Railway button, and an account bar for whoever
+is signed in.
 
 ## Layout
 
 | Path | |
 |---|---|
 | `src/pages/index.astro` | The only route. |
-| `src/components/LoginButton.tsx` | The button, hydrated with `client:load`. |
+| `src/components/App.tsx` | The one island, hydrated with `client:load`. |
+| `src/components/LoginButton.tsx` | The button. |
+| `src/components/UserMenu.tsx` | Name, avatar and log out, top right. |
+| `src/lib/session.tsx` | The session context, provider and hook. |
 | `src/styles/global.css` | Everything visual. No framework. |
 | `astro.config.mjs` | React integration, and the output paths Bazel overrides. |
 
@@ -24,9 +28,24 @@ keeps middle-click, keyboard activation and the status bar working. It is a
 React component anyway because the redirect takes a moment and the click needs
 acknowledging.
 
-Reading the logged-in user back from `GET /api/v1/users/me` is the obvious next
-thing; the API already serves it, and CORS already allows credentials from this
-origin.
+## The session
+
+The site is static, so the build knows nothing about who is looking at it and
+the browser has to ask. `SessionProvider` requests `GET /api/v1/users/me` once
+with `credentials: 'include'`, which is what attaches the session cookie across
+the two origins. A `401` is the ordinary answer for a visitor who has not logged
+in, not an error.
+
+That answer decides what renders. `session.isSignedIn()` and
+`session.isSignedOut()` are not each other's negation — until the request
+answers, both are false — so the account bar and the login button each wait for
+their own answer instead of one of them showing to the wrong person.
+
+React context does not cross Astro island boundaries, so everything that reads
+the session lives under a single `client:load` island rather than one per
+component. That is what `App.tsx` is for, and it is why logging out needs no
+page reload: `DELETE /auth/session` clears the `HttpOnly` cookie server-side —
+nothing else can — and the provider then tells both components at once.
 
 ## Configuration
 
