@@ -1,0 +1,19 @@
+---
+import LoginButton from '../components/LoginButton.tsx';
+import '../styles/global.css';
+---
+
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>monorail</title>
+  </head>
+  <body>
+    <main>
+      <h1>monorail</h1>
+      <p>Sign in with your Railway account to continue.</p>
+      <LoginButton client:load />
+    </main>
+  </body>
+</html>

@@ -176,7 +176,11 @@ pub struct Config {
     /// How long a request waits for a pooled connection before giving up. This
     /// covers queueing behind a busy pool as well as opening a new connection.
     pub database_connect_timeout: Duration,
-    pub railway_oauth: OAuthConfig,
+    /// How long a session cookie stays valid. Enforced against the stored
+    /// session, not the cookie's own `Max-Age`, which a client controls.
+    pub session_ttl: Duration,
+    /// Where a completed login sends the browser.
+    pub auth_success_redirect: String,
 }
 
 /// Everything a login against Railway needs.
@@ -251,7 +255,14 @@ impl Config {
                 constants::DATABASE_CONNECT_TIMEOUT_SECS,
                 constants::DEFAULT_DATABASE_CONNECT_TIMEOUT_SECS,
             )?),
-            railway_oauth: railway_oauth()?,
+            session_ttl: Duration::from_secs(parsed(
+                constants::SESSION_TTL_SECS,
+                constants::DEFAULT_SESSION_TTL_SECS,
+            )?),
+            auth_success_redirect: parsed(
+                constants::AUTH_SUCCESS_REDIRECT,
+                constants::DEFAULT_AUTH_SUCCESS_REDIRECT.to_owned(),
+            )?,
         })
     }
 }
@@ -279,19 +290,26 @@ fn database_url(environment: Environment) -> Result<DatabaseUrl, ConfigError> {
     }
 }
 
-/// Assembles the Railway OAuth settings.
-fn railway_oauth() -> Result<OAuthConfig, ConfigError> {
-    Ok(OAuthConfig {
-        issuer: issuer()?,
-        client_id: required(constants::RAILWAY_CLIENT_ID)?,
-        client_secret: Secret::new(required(constants::RAILWAY_CLIENT_SECRET)?),
-        redirect_uri: required(constants::RAILWAY_REDIRECT_URI)?,
-        scopes: scopes()?,
-        timeout: Duration::from_secs(parsed(
-            constants::RAILWAY_TIMEOUT_SECS,
-            constants::DEFAULT_RAILWAY_TIMEOUT_SECS,
-        )?),
-    })
+impl OAuthConfig {
+    /// Reads the login settings from the process environment.
+    ///
+    /// Separate from [`Config::from_env`] because only the server logs anyone
+    /// in. `//api:migrate` needs a database and nothing else, and asking a
+    /// migration job for OAuth credentials it never sends would be a way to
+    /// leak them.
+    pub fn from_env() -> Result<Self, ConfigError> {
+        Ok(Self {
+            issuer: issuer()?,
+            client_id: required(constants::RAILWAY_CLIENT_ID)?,
+            client_secret: Secret::new(required(constants::RAILWAY_CLIENT_SECRET)?),
+            redirect_uri: required(constants::RAILWAY_REDIRECT_URI)?,
+            scopes: scopes()?,
+            timeout: Duration::from_secs(parsed(
+                constants::RAILWAY_TIMEOUT_SECS,
+                constants::DEFAULT_RAILWAY_TIMEOUT_SECS,
+            )?),
+        })
+    }
 }
 
 /// Normalises the issuer to end in `/`. Without that, `Url::join("oauth/token")`

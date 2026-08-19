@@ -3,6 +3,7 @@
 #
 #   tools/stack.sh up       # Postgres, migrations, then the API in the foreground
 #   tools/stack.sh db       # Postgres alone, detached
+#   tools/stack.sh ui       # the Astro dev server on :4321
 #   tools/stack.sh down     # stop Postgres; the data volume survives
 #   tools/stack.sh reset    # stop Postgres and delete the data volume
 #   tools/stack.sh migrate  # apply pending migrations and exit
@@ -45,9 +46,13 @@ up)
     echo
     echo "Postgres ${URL}"
     echo "Starting the API on http://localhost:8080 — Ctrl-C to stop it."
+    echo "For the UI, run 'tools/stack.sh ui' in another terminal."
     echo
     # exec so Ctrl-C reaches the server's own shutdown handler.
     exec bazel run //api
+    ;;
+ui)
+    exec bazel run //ui:dev
     ;;
 db)
     start_postgres

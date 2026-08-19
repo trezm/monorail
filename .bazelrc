@@ -21,6 +21,13 @@ test --test_summary=terse
 test:verbose --test_output=all
 test:verbose --test_arg=--nocapture
 
+# The UI bakes the API URL into the page at build time, so it is a build input
+# rather than runtime configuration. Development points at the local API; a
+# release build has no default and fails until it is given one, which is what
+# stops a deployed site sending people to their own localhost.
+build --define=PUBLIC_API_URL=http://localhost:8080
+build:release --define=PUBLIC_API_URL=
+
 build:release --compilation_mode=opt
 build:release --strip=always
 build:release --@rules_rust//rust/settings:extra_rustc_flags=-Ccodegen-units=1

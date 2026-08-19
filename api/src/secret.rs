@@ -2,6 +2,7 @@
 
 use std::fmt;
 
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 
 /// Wraps a credential so it cannot be printed by accident.
@@ -17,6 +18,23 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct Secret(String);
+
+/// Bytes of entropy behind [`random_token`]. 32 is the ceiling RFC 7636 §4.1
+/// allows for a PKCE verifier once base64url-encoded, and well past guessing
+/// range for a session token.
+const ENTROPY_BYTES: usize = 32;
+
+/// A URL-safe random string, drawn from the operating system's generator.
+///
+/// Suitable anywhere an unguessable value is needed and no structure is wanted:
+/// PKCE verifiers, OAuth `state`, session tokens.
+#[must_use]
+pub fn random_token() -> String {
+    let mut bytes = [0u8; ENTROPY_BYTES];
+    rand::fill(&mut bytes);
+
+    URL_SAFE_NO_PAD.encode(bytes)
+}
 
 impl Secret {
     #[must_use]
@@ -59,6 +77,19 @@ mod tests {
         assert_eq!(format!("{secret:?}"), "[redacted]");
         assert!(!format!("{:?}", vec![secret.clone()]).contains("hunter2"));
         assert_eq!(secret.expose(), "hunter2");
+    }
+
+    #[test]
+    fn random_tokens_do_not_repeat() {
+        let token = super::random_token();
+
+        assert_ne!(token, super::random_token());
+        assert!(
+            token
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_'),
+            "should be URL-safe, got {token}"
+        );
     }
 
     #[test]

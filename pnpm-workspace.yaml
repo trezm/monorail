@@ -1,0 +1,10 @@
+# The JavaScript half of the workspace, mirroring what Cargo.toml is for Rust:
+# one lockfile at the root, one package per directory. rules_js reads the
+# lockfile this produces.
+packages:
+  - ui
+
+# esbuild links its platform binary in a postinstall; Astro's bundler cannot run
+# without it. pnpm 11 reads build-script approvals from here, not package.json.
+allowBuilds:
+  esbuild: true
