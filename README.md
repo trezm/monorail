@@ -25,8 +25,7 @@ running `astro` outside Bazel.
 ## Everyday commands
 
 ```bash
-tools/stack.sh up          # Postgres on :5432, then the API on :8080
-tools/stack.sh ui          # the UI on :4321
+tools/stack.sh up          # Postgres on :5432, the UI on :4321, the API on :8080
 bazel build //...          # build everything
 bazel test //...           # run every test
 bazel run //api            # run the API on :8080
@@ -50,12 +49,12 @@ bazel build --config=release //api
 
 ## Local stack
 
-[`tools/stack.sh`](tools/stack.sh) runs Postgres and the API together.
+[`tools/stack.sh`](tools/stack.sh) runs Postgres, the UI and the API together.
 
 ```bash
-tools/stack.sh up      # Postgres, migrations, then the API in the foreground
+tools/stack.sh up      # Postgres, migrations, then the UI and the API
 tools/stack.sh db      # Postgres alone — run the API yourself
-tools/stack.sh ui      # the Astro dev server, in another terminal
+tools/stack.sh ui      # the Astro dev server alone
 tools/stack.sh migrate # apply pending migrations and exit
 tools/stack.sh down    # stop Postgres; the data volume survives
 tools/stack.sh reset   # stop Postgres and delete the data volume
