@@ -10,7 +10,7 @@ use monorail_api::{Config, Database, telemetry};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let _ = dotenvy::dotenv();
+    monorail_api::load_dotenv();
 
     let config = Config::from_env()?;
     telemetry::init(&config)?;

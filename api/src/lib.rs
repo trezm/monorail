@@ -44,7 +44,7 @@ use tower_http::{
 };
 use tracing::{Level, Span};
 
-pub use config::Config;
+pub use config::{Config, load_dotenv};
 pub use db::Database;
 pub use error::{ApiError, ApiResult};
 pub use secret::Secret;

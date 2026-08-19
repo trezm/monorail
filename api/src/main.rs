@@ -5,9 +5,7 @@ use monorail_api::{Config, telemetry};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    // Developer convenience: a local `.env` never overrides real environment.
-    // Absent file is not an error.
-    let _ = dotenvy::dotenv();
+    monorail_api::load_dotenv();
 
     let config = Config::from_env()?;
     telemetry::init(&config)?;
