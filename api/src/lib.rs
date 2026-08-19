@@ -105,7 +105,7 @@ pub fn app(state: AppState) -> Router {
 /// Migrations are not run here — that is `//api:migrate`.
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.host, config.port));
-    let oauth = config.railway_oauth.clone();
+    let oauth = config::OAuthConfig::from_env()?;
     tracing::info!(issuer = %oauth.issuer, scopes = ?oauth.scopes, "Railway login enabled");
     let state = AppState::new(config, Arc::new(RailwayAuth::new(oauth)?));
 

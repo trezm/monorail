@@ -45,7 +45,6 @@ fn test_config() -> Config {
         database_url: DatabaseUrl::new("postgres://unused@127.0.0.1:1/unused"),
         database_pool_size: 1,
         database_connect_timeout: std::time::Duration::from_millis(50),
-        railway_oauth: test_oauth(),
         session_ttl: std::time::Duration::from_hours(1),
         auth_success_redirect: "http://localhost:4321/".to_owned(),
     }
@@ -65,10 +64,9 @@ fn test_oauth() -> OAuthConfig {
 }
 
 fn app() -> Router {
-    let config = test_config();
-    let auth = RailwayAuth::new(config.railway_oauth.clone()).expect("client should build");
+    let auth = RailwayAuth::new(test_oauth()).expect("client should build");
 
-    monorail_api::app(AppState::new(config, Arc::new(auth)))
+    monorail_api::app(AppState::new(test_config(), Arc::new(auth)))
 }
 
 async fn send(app: &Router, request: Request<Body>) -> (StatusCode, Value) {

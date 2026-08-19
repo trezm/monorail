@@ -16,7 +16,7 @@ use diesel::{
     ExpressionMethods as _, Identifiable, OptionalExtension as _, QueryDsl as _, Queryable,
     Selectable, SelectableHelper as _,
 };
-use diesel_async::RunQueryDsl as _;
+use diesel_async::{AsyncConnection as _, RunQueryDsl as _};
 use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
@@ -155,11 +155,8 @@ impl PgSessionStore {
 
 #[async_trait::async_trait]
 impl SessionStore for PgSessionStore {
-    /// Deliberately not one transaction. The user upsert is idempotent, so the
-    /// worst a failure between the two statements leaves behind is a user row
-    /// with no session — which the next login reuses. Wrapping it would pull in
-    /// `scoped-futures` to bridge diesel-async's transaction closure for no
-    /// invariant that is actually at risk.
+    /// One transaction: a login either produces a user and the session that
+    /// goes with it, or neither.
     async fn begin(
         &self,
         identity: &RailwayIdentity,
@@ -167,41 +164,47 @@ impl SessionStore for PgSessionStore {
     ) -> SessionResult<(SessionToken, Session)> {
         let mut conn = self.database.conn().await?;
         let now = Utc::now();
-
-        let user = diesel::insert_into(users::table)
-            .values((
-                users::railway_user_id.eq(&identity.subject),
-                users::email.eq(&identity.email),
-                users::name.eq(&identity.name),
-                users::avatar_url.eq(&identity.avatar_url),
-            ))
-            .on_conflict(users::railway_user_id)
-            .do_update()
-            .set((
-                users::email.eq(&identity.email),
-                users::name.eq(&identity.name),
-                users::avatar_url.eq(&identity.avatar_url),
-                users::updated_at.eq(now),
-            ))
-            .returning(User::as_returning())
-            .get_result::<User>(&mut conn)
-            .await?;
-
         let token = SessionToken::generate();
         let expires_at = now + self.ttl;
 
-        let id = diesel::insert_into(sessions::table)
-            .values((
-                sessions::token_hash.eq(token.digest()),
-                sessions::user_id.eq(user.id),
-                sessions::access_token.eq(tokens.access_token.expose()),
-                sessions::refresh_token.eq(tokens.refresh_token.as_ref().map(Secret::expose)),
-                sessions::scope.eq(&tokens.scope),
-                sessions::access_token_expires_at.eq(tokens.expires_at),
-                sessions::expires_at.eq(expires_at),
-            ))
-            .returning(sessions::id)
-            .get_result::<Uuid>(&mut conn)
+        let (user, id) = conn
+            .transaction::<_, SessionError, _>(async |conn| {
+                let user = diesel::insert_into(users::table)
+                    .values((
+                        users::railway_user_id.eq(&identity.subject),
+                        users::email.eq(&identity.email),
+                        users::name.eq(&identity.name),
+                        users::avatar_url.eq(&identity.avatar_url),
+                    ))
+                    .on_conflict(users::railway_user_id)
+                    .do_update()
+                    .set((
+                        users::email.eq(&identity.email),
+                        users::name.eq(&identity.name),
+                        users::avatar_url.eq(&identity.avatar_url),
+                        users::updated_at.eq(now),
+                    ))
+                    .returning(User::as_returning())
+                    .get_result::<User>(conn)
+                    .await?;
+
+                let id = diesel::insert_into(sessions::table)
+                    .values((
+                        sessions::token_hash.eq(token.digest()),
+                        sessions::user_id.eq(user.id),
+                        sessions::access_token.eq(tokens.access_token.expose()),
+                        sessions::refresh_token
+                            .eq(tokens.refresh_token.as_ref().map(Secret::expose)),
+                        sessions::scope.eq(&tokens.scope),
+                        sessions::access_token_expires_at.eq(tokens.expires_at),
+                        sessions::expires_at.eq(expires_at),
+                    ))
+                    .returning(sessions::id)
+                    .get_result::<Uuid>(conn)
+                    .await?;
+
+                Ok((user, id))
+            })
             .await?;
 
         Ok((

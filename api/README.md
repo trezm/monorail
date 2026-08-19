@@ -154,9 +154,11 @@ done anyway: it costs one cached key fetch, and it does not rest on that
 argument staying true. Identity itself still comes from the userinfo endpoint.
 
 **Configuration.** The client ID, client secret and redirect URI are
-required. If any of them is missing, the service fails at startup and names the
+required. If any of them is missing, the server fails at startup and names the
 one it wanted. Nothing here works without a login, so there is no mode in which
-the service runs with authentication disabled.
+the server runs with authentication disabled. `OAuthConfig::from_env` is read
+by the server alone — `//api:migrate` needs a database and nothing else, so a
+migration job is never handed credentials it would not send.
 
 **Secrets in logs.** The code wraps tokens and the `state` value in
 [`Secret`](src/secret.rs), or gives them a `Debug` that redacts them. A
