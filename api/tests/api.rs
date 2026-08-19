@@ -30,6 +30,7 @@ fn test_config() -> Config {
         cors_origins: CorsOrigins::Disabled,
         // Unreachable on purpose: nothing in these tests should call out.
         railway_endpoint: "http://127.0.0.1:1/graphql".to_owned(),
+        railway_timeout: std::time::Duration::from_secs(1),
     }
 }
 

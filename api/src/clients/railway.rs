@@ -5,8 +5,8 @@
 //! projects, which is what [`ProjectManager`] asks for.
 //!
 //! Railway's public API is GraphQL, so this holds the HTTP client that will
-//! carry those queries, and the endpoint it sends them to. The trait methods
-//! are still unimplemented.
+//! carry those queries, plus the endpoint and per-request timeout it is
+//! configured with. The trait methods are still unimplemented.
 
 use std::time::Duration;
 
@@ -14,12 +14,6 @@ use crate::services::{
     project::{Project, ProjectId, ProjectManager, ProjectResult},
     service::{ServiceId, ServiceManager, ServiceResult},
 };
-
-/// How long a single Railway request may take before we give up on it.
-///
-/// Well under the API's own 30s request timeout, so a stalled upstream call
-/// cannot hold a client connection open past it.
-const TIMEOUT: Duration = Duration::from_secs(15);
 
 /// Talks to the Railway GraphQL API on our behalf.
 ///
@@ -32,17 +26,17 @@ pub struct Railway {
 }
 
 impl Railway {
-    /// `endpoint` comes from [`Config::railway_endpoint`](crate::config::Config),
-    /// which defaults to Railway's public API and is overridable with
-    /// `API_RAILWAY_ENDPOINT` for a self-hosted install or a test stub.
+    /// Both arguments come from [`Config`](crate::config::Config)
+    /// (`railway_endpoint` and `railway_timeout`), so they are set by
+    /// `API_RAILWAY_ENDPOINT` and `API_RAILWAY_TIMEOUT_SECS`.
     ///
     /// # Errors
     ///
     /// Fails if the TLS backend cannot be initialised, which in practice means
     /// a broken build rather than anything recoverable at runtime.
-    pub fn new(endpoint: impl Into<String>) -> reqwest::Result<Self> {
+    pub fn new(endpoint: impl Into<String>, timeout: Duration) -> reqwest::Result<Self> {
         Ok(Self {
-            http: reqwest::Client::builder().timeout(TIMEOUT).build()?,
+            http: reqwest::Client::builder().timeout(timeout).build()?,
             endpoint: endpoint.into(),
         })
     }
