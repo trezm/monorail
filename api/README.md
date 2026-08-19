@@ -25,6 +25,7 @@ The service requires Postgres and refuses to start without it. See
 | `src/telemetry.rs` | Tracing subscriber setup. |
 | `src/shutdown.rs` | SIGINT/SIGTERM handling. |
 | `src/bin/migrate.rs` | Applies pending migrations and exits. |
+| `src/secret.rs` | A string that must not reach a log line. |
 | `src/routes/` | HTTP handlers, one module per resource. |
 | `src/services/` | Business logic, one trait per capability. |
 | `migrations/` | Schema history, embedded into the binary. |
@@ -123,6 +124,31 @@ It reads the same `API_DATABASE_URL` and the same embedded migrations as the
 server, so there is no second source of truth. The server deliberately does not
 migrate on startup — in a rolling deploy every replica would race to run them,
 so this wants to be one job per deploy.
+
+## Authentication
+
+Users log in with Railway, which is an OAuth 2.0 and OpenID Connect provider.
+[`src/services/auth.rs`](src/services/auth.rs) owns the protocol:
+`AuthProvider` is the capability, `RailwayAuth` the implementation. Every
+endpoint is derived from the configured issuer, so a test points it at a local
+server instead of the network.
+
+Authorization code with PKCE, `S256` — the only challenge method Railway
+advertises. The ID token's signature is not checked and there is no JWKS
+client: the token set arrives over TLS from a direct, client-authenticated call
+to the token endpoint rather than through the browser, which OpenID Connect
+Core §3.1.3.7 exempts. Identity comes from the userinfo endpoint, so nothing
+depends on parsing the JWT.
+
+`AppState::auth()` is `Option`: with no OAuth app configured the service still
+starts and the login routes answer `503`. Configuring some but not all of the
+client id, secret and redirect URI is a startup error instead — that shape is a
+deployment mistake, and left alone it fails as a redirect loop rather than a
+readable message.
+
+Tokens and the `state` value are wrapped in [`Secret`](src/secret.rs) or a
+redacting `Debug`, so `?config`, a panic message or an error report cannot spill
+one.
 
 ## Configuration
 

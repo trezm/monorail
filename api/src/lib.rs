@@ -10,6 +10,7 @@ pub mod db;
 pub mod error;
 pub mod extract;
 pub mod routes;
+pub mod secret;
 pub mod services;
 pub mod shutdown;
 pub mod state;
@@ -26,6 +27,8 @@ use axum::{
         header::{AUTHORIZATION, COOKIE, SET_COOKIE},
     },
 };
+use std::sync::Arc;
+
 use tokio::net::TcpListener;
 use tower::ServiceBuilder;
 use tower_http::{
@@ -43,6 +46,8 @@ use tracing::{Level, Span};
 pub use config::Config;
 pub use db::Database;
 pub use error::{ApiError, ApiResult};
+pub use secret::Secret;
+pub use services::auth::{AuthProvider, RailwayAuth};
 pub use state::AppState;
 
 /// Builds the fully-configured application.
@@ -98,7 +103,18 @@ pub fn app(state: AppState) -> Router {
 /// Migrations are not run here — that is `//api:migrate`.
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.host, config.port));
-    let state = AppState::new(config);
+    let oauth = config.railway_oauth.clone();
+    let mut state = AppState::new(config);
+
+    if let Some(oauth) = oauth {
+        tracing::info!(issuer = %oauth.issuer, scopes = ?oauth.scopes, "Railway login enabled");
+        state = state.with_auth(Arc::new(RailwayAuth::new(oauth)?));
+    } else {
+        tracing::warn!(
+            "Railway login is disabled; set {} to enable it",
+            constants::RAILWAY_CLIENT_ID
+        );
+    }
 
     state.db().ping().await.with_context(|| {
         format!(
