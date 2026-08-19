@@ -1,5 +1,6 @@
 ---
 import LoginButton from '../components/LoginButton.tsx';
+import UserMenu from '../components/UserMenu.tsx';
 import '../styles/global.css';
 ---
 
@@ -10,6 +11,7 @@ import '../styles/global.css';
     <title>monorail</title>
   </head>
   <body>
+    <UserMenu client:load />
     <main>
       <h1>monorail</h1>
       <p>Sign in with your Railway account to continue.</p>

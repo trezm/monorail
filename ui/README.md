@@ -7,7 +7,8 @@ bazel run //ui:dev     # http://localhost:4321
 bazel build //ui       # static site into bazel-bin/ui/dist
 ```
 
-One page so far — a Login with Railway button.
+One page so far — a Login with Railway button, and an account bar for whoever
+is signed in.
 
 ## Layout
 
@@ -15,6 +16,8 @@ One page so far — a Login with Railway button.
 |---|---|
 | `src/pages/index.astro` | The only route. |
 | `src/components/LoginButton.tsx` | The button, hydrated with `client:load`. |
+| `src/components/UserMenu.tsx` | Name, avatar and log out, top right. |
+| `src/lib/session.ts` | Who is signed in, and how to stop being. |
 | `src/styles/global.css` | Everything visual. No framework. |
 | `astro.config.mjs` | React integration, and the output paths Bazel overrides. |
 
@@ -24,9 +27,19 @@ keeps middle-click, keyboard activation and the status bar working. It is a
 React component anyway because the redirect takes a moment and the click needs
 acknowledging.
 
-Reading the logged-in user back from `GET /api/v1/users/me` is the obvious next
-thing; the API already serves it, and CORS already allows credentials from this
-origin.
+## The session
+
+The site is static, so the build knows nothing about who is looking at it. Every
+island asks `GET /api/v1/users/me` with `credentials: 'include'`, which is what
+attaches the session cookie across the two origins; `src/lib/session.ts` shares
+one request between them. A `401` is the ordinary answer for a visitor who has
+not logged in, not an error.
+
+That answer decides what renders: the account bar appears only with a session,
+the login button only without one, and neither renders while the question is
+still outstanding. Logging out is `DELETE /auth/session` — the cookie is
+`HttpOnly`, so the server is the only thing that can clear it — followed by a
+reload, which is cheaper than telling every island what changed.
 
 ## Configuration
 
