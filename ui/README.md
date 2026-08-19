@@ -41,7 +41,12 @@ How it is supplied depends on how you build:
 |---|---|
 | `bazel build //ui` | `--define=PUBLIC_API_URL=...`, defaulting to the local API in [`//.bazelrc`](../.bazelrc) |
 | `bazel build --config=release //ui` | the same `--define`, with no default — the build fails without it |
-| `pnpm dev` / `pnpm build` in `ui/` | [`.env`](.env.example), which Astro loads itself |
+| `pnpm dev` / `pnpm build` | [`ui/.env`](.env.example), which Astro loads itself |
+
+Astro reads it from its project root, which is this directory under both
+`pnpm --filter ui` and `astro --root ui`, and Vite does not search parent
+directories: a `.env` at the workspace root is never read. The API resolves its
+own file the same way, deliberately — see [`../api/README.md`](../api/README.md).
 
 `ui/.env` does **not** reach a Bazel build. A file Bazel was not told about is
 absent from the sandbox, so Astro never sees it; that is why the release config

@@ -223,7 +223,10 @@ Every variable is `API_`-prefixed and optional — see [`.env.example`](.env.exa
 for the full list with defaults. `PORT` is also honored unprefixed, since that
 is what most container platforms inject.
 
-The binary loads `.env` if present; tests never do.
+The binaries load `api/.env` if present, whatever directory they were started
+from — `cargo run` from the workspace root and `bazel run //api`, whose working
+directory is its runfiles tree, both read this crate's file and not one at the
+workspace root. Real environment wins over it, and tests never load it at all.
 
 ## Deployment
 

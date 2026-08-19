@@ -8,6 +8,7 @@ use std::{
     env::{self, VarError},
     fmt::{self, Display},
     net::{IpAddr, Ipv4Addr},
+    path::PathBuf,
     str::FromStr,
     time::Duration,
 };
@@ -15,6 +16,29 @@ use std::{
 use url::Url;
 
 use crate::{constants, secret::Secret};
+
+/// Where `bazel run` records the checkout it was invoked from. Unset under
+/// Cargo, and unset in a deployed binary.
+const BAZEL_WORKSPACE: &str = "BUILD_WORKSPACE_DIRECTORY";
+
+/// Loads `api/.env` into the process environment. A variable already set wins,
+/// and an absent file is not an error.
+///
+/// The file is addressed rather than searched for. `dotenvy`'s own search walks
+/// up from the working directory, which makes the file it finds depend on where
+/// the process was started: a `.env` at the workspace root under `cargo run`,
+/// and nothing at all under `bazel run`, whose working directory is the
+/// runfiles tree. Bazel hands back the checkout in the environment; Cargo bakes
+/// the manifest directory in at compile time.
+pub fn load_dotenv() {
+    let crate_dir = env::var_os(BAZEL_WORKSPACE)
+        .map(|workspace| PathBuf::from(workspace).join("api"))
+        .or_else(|| option_env!("CARGO_MANIFEST_DIR").map(PathBuf::from));
+
+    if let Some(dir) = crate_dir {
+        let _ = dotenvy::from_path(dir.join(".env"));
+    }
+}
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
