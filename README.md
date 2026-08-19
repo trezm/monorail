@@ -3,7 +3,8 @@
 A Bazel monorepo:
 
 - [`api/`](api) — a Rust/axum HTTP API backed by Postgres, with Railway OAuth login.
-- [`ui/`](ui) — an Astro + React front end.
+- [`ui/`](ui) — an Astro + React front end: log in, then browse your Railway
+  projects and the services in them.
 
 ## Prerequisites
 

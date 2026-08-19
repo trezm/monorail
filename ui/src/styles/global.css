@@ -1,19 +1,25 @@
 :root {
   color-scheme: light dark;
   --background: #ffffff;
+  --surface: #f7f6fa;
+  --border: #e4e1ec;
   --foreground: #13111c;
   --muted: #5b5670;
   --accent: #13111c;
   --accent-foreground: #ffffff;
+  --danger: #b3261e;
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
     --background: #13111c;
+    --surface: #1c1a26;
+    --border: #2e2b3b;
     --foreground: #f5f4f8;
     --muted: #a09bb4;
     --accent: #ffffff;
     --accent-foreground: #13111c;
+    --danger: #f2b8b5;
   }
 }
 
@@ -24,20 +30,15 @@
 body {
   margin: 0;
   min-height: 100vh;
-  display: grid;
-  place-items: center;
   background: var(--background);
   color: var(--foreground);
-  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
 main {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: 1.25rem;
-  padding: 2rem;
-  text-align: center;
+  width: min(48rem, 100%);
+  margin: 0 auto;
+  padding: 2rem 1.25rem 4rem;
 }
 
 h1 {
@@ -48,6 +49,155 @@ h1 {
 
 p {
   margin: 0;
+  color: var(--muted);
+}
+
+/* The signed-out state is the whole page, so it centres itself rather than
+   sitting at the top of an empty column. */
+.hero {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1.25rem;
+  min-height: 70vh;
+  justify-content: center;
+  text-align: center;
+}
+
+.masthead {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-bottom: 1.5rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.masthead__user {
+  margin-top: 0.35rem;
+  font-size: 0.9rem;
+}
+
+.section-heading {
+  margin: 2rem 0 0.75rem;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+
+.notice {
+  padding: 1rem 0;
+  font-size: 0.95rem;
+}
+
+.notice--error {
+  color: var(--danger);
+}
+
+.projects {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.project {
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  background: var(--surface);
+}
+
+.project__summary {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 1rem;
+  border-radius: 0.75rem;
+  cursor: pointer;
+  font-weight: 600;
+  /* The default triangle is replaced by the chevron below, which can be
+     rotated. Safari needs the -webkit- rule as well. */
+  list-style: none;
+}
+
+.project__summary::-webkit-details-marker {
+  display: none;
+}
+
+.project__summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.project__chevron {
+  flex: none;
+  width: 0.85rem;
+  height: 0.85rem;
+  color: var(--muted);
+  transition: transform 120ms ease-out;
+}
+
+.project[open] .project__chevron {
+  transform: rotate(90deg);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project__chevron {
+    transition: none;
+  }
+}
+
+.project__name {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.project__count {
+  flex: none;
+  font-size: 0.8rem;
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.project__description,
+.project__empty {
+  padding: 0 1rem 1rem;
+  font-size: 0.9rem;
+}
+
+.services {
+  margin: 0;
+  padding: 0 0.5rem 0.5rem;
+  list-style: none;
+}
+
+.service {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  background: var(--background);
+  font-size: 0.95rem;
+}
+
+.service + .service {
+  margin-top: 0.35rem;
+}
+
+.service__name {
+  overflow-wrap: anywhere;
+}
+
+.service__created {
+  flex: none;
+  font-size: 0.8rem;
   color: var(--muted);
 }
 
@@ -81,4 +231,30 @@ p {
 .login-button__mark {
   width: 1.15rem;
   height: 1.15rem;
+}
+
+.text-button {
+  flex: none;
+  padding: 0.4rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: none;
+  color: var(--muted);
+  font: inherit;
+  font-size: 0.85rem;
+  cursor: pointer;
+}
+
+.text-button:hover:not(:disabled) {
+  color: var(--foreground);
+}
+
+.text-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.text-button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
 }

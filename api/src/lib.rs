@@ -49,6 +49,7 @@ pub use db::Database;
 pub use error::{ApiError, ApiResult};
 pub use secret::Secret;
 pub use services::auth::{AuthProvider, RailwayAuth};
+pub use services::railway::{RailwayApi, RailwayGraphQl};
 pub use state::AppState;
 
 /// Builds the fully-configured application.
@@ -107,7 +108,8 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.host, config.port));
     let oauth = config::OAuthConfig::from_env()?;
     tracing::info!(issuer = %oauth.issuer, scopes = ?oauth.scopes, "Railway login enabled");
-    let state = AppState::new(config, Arc::new(RailwayAuth::new(oauth)?));
+    let railway = Arc::new(RailwayGraphQl::new(&oauth)?);
+    let state = AppState::new(config, Arc::new(RailwayAuth::new(oauth)?), railway);
 
     state.db().ping().await.with_context(|| {
         format!(

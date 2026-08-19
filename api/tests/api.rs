@@ -21,7 +21,8 @@ use monorail_api::{
     config::{Config, CorsOrigins, DatabaseUrl, Environment, LogFormat, OAuthConfig},
     routes::auth::{PENDING_COOKIE, SESSION_COOKIE},
     services::{
-        auth::{AuthProvider, AuthResult, CsrfState, Pkce, RailwayIdentity, TokenSet},
+        auth::{AuthError, AuthProvider, AuthResult, CsrfState, Pkce, RailwayIdentity, TokenSet},
+        railway::{Project, RailwayApi, RailwayResult, Service},
         session::{Session, SessionResult, SessionStore, SessionToken, User},
     },
 };
@@ -66,7 +67,11 @@ fn test_oauth() -> OAuthConfig {
 fn app() -> Router {
     let auth = RailwayAuth::new(test_oauth()).expect("client should build");
 
-    monorail_api::app(AppState::new(test_config(), Arc::new(auth)))
+    monorail_api::app(AppState::new(
+        test_config(),
+        Arc::new(auth),
+        Arc::new(StubRailway::default()),
+    ))
 }
 
 async fn send(app: &Router, request: Request<Body>) -> (StatusCode, Value) {
@@ -139,6 +144,11 @@ fn location(response: &Response) -> String {
 /// cookie it produces is the one the callback has to match.
 struct StubAuth;
 
+impl StubAuth {
+    /// The only refresh token this provider will trade in.
+    const REFRESHED: &'static str = "refresh-ok";
+}
+
 const STUB_SUBJECT: &str = "user_stub";
 
 #[async_trait::async_trait]
@@ -163,8 +173,20 @@ impl AuthProvider for StubAuth {
         })
     }
 
-    async fn refresh(&self, _refresh_token: &Secret) -> AuthResult<TokenSet> {
-        unreachable!("the login flow never refreshes")
+    /// Only [`StubAuth::REFRESHED`] is honoured, so a test can tell a renewal
+    /// that worked from one the provider has stopped accepting.
+    async fn refresh(&self, refresh_token: &Secret) -> AuthResult<TokenSet> {
+        if refresh_token.expose() != StubAuth::REFRESHED {
+            return Err(AuthError::InvalidGrant);
+        }
+
+        Ok(TokenSet {
+            access_token: Secret::new("access-renewed"),
+            refresh_token: None,
+            id_token: None,
+            scope: "openid email".to_owned(),
+            expires_at: chrono::Utc::now() + chrono::TimeDelta::seconds(3600),
+        })
     }
 
     async fn identity(&self, _access_token: &Secret) -> AuthResult<RailwayIdentity> {
@@ -223,18 +245,126 @@ impl SessionStore for MemorySessions {
             .cloned())
     }
 
+    async fn renew(&self, token: &SessionToken, tokens: &TokenSet) -> SessionResult<()> {
+        if let Some(session) = self.rows.lock().expect("lock").get_mut(&token.digest()) {
+            session.tokens = tokens.clone();
+        }
+
+        Ok(())
+    }
+
     async fn end(&self, token: &SessionToken) -> SessionResult<()> {
         self.rows.lock().expect("lock").remove(&token.digest());
         Ok(())
     }
 }
 
+/// A [`RailwayApi`] that answers without a network, and remembers which access
+/// token it was handed — which is how the renewal tests tell a spent token from
+/// a fresh one.
+#[derive(Default)]
+struct StubRailway {
+    seen: Mutex<Vec<String>>,
+}
+
+impl StubRailway {
+    fn last_token(&self) -> Option<String> {
+        self.seen.lock().expect("lock").last().cloned()
+    }
+}
+
+#[async_trait::async_trait]
+impl RailwayApi for StubRailway {
+    async fn projects(&self, access_token: &Secret) -> RailwayResult<Vec<Project>> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push(access_token.expose().to_owned());
+
+        Ok(vec![
+            Project {
+                id: "project-1".to_owned(),
+                name: "atlas".to_owned(),
+                description: Some("the first one".to_owned()),
+                created_at: None,
+                services: vec![
+                    Service {
+                        id: "service-1".to_owned(),
+                        name: "api".to_owned(),
+                        created_at: None,
+                    },
+                    Service {
+                        id: "service-2".to_owned(),
+                        name: "worker".to_owned(),
+                        created_at: None,
+                    },
+                ],
+            },
+            Project {
+                id: "project-2".to_owned(),
+                name: "beacon".to_owned(),
+                description: None,
+                created_at: None,
+                services: Vec::new(),
+            },
+        ])
+    }
+}
+
 /// The router with a login that works, and sessions that do not need a database.
 fn app_with_login() -> (Router, Arc<MemorySessions>) {
-    let sessions = Arc::new(MemorySessions::default());
-    let state = AppState::new(test_config(), Arc::new(StubAuth)).with_sessions(sessions.clone());
+    let (app, sessions, _) = app_with_railway();
 
-    (monorail_api::app(state), sessions)
+    (app, sessions)
+}
+
+/// The same, plus the Railway stub, for a test that has to see what was asked
+/// of it.
+fn app_with_railway() -> (Router, Arc<MemorySessions>, Arc<StubRailway>) {
+    let sessions = Arc::new(MemorySessions::default());
+    let railway = Arc::new(StubRailway::default());
+    let state = AppState::new(test_config(), Arc::new(StubAuth), railway.clone())
+        .with_sessions(sessions.clone());
+
+    (monorail_api::app(state), sessions, railway)
+}
+
+/// Drives a whole login and returns the `Cookie` header value a browser would
+/// send afterwards.
+async fn log_in(app: &Router) -> String {
+    let response = raw(
+        app,
+        get_with_cookie(
+            "/auth/railway/callback?code=code-ok&state=issued",
+            &pending_cookie("issued", "verifier"),
+        ),
+    )
+    .await;
+
+    set_cookie_named(&response, SESSION_COOKIE)
+        .expect("session cookie should be set")
+        .split(';')
+        .next()
+        .expect("cookie should have a value")
+        .to_owned()
+}
+
+/// Opens a session directly on the store, so a test can choose the Railway
+/// tokens it carries rather than take the ones the stub login mints.
+async fn session_cookie_with(sessions: &MemorySessions, tokens: TokenSet) -> String {
+    let identity = RailwayIdentity {
+        subject: STUB_SUBJECT.to_owned(),
+        email: None,
+        name: None,
+        avatar_url: None,
+    };
+
+    let (token, _) = sessions
+        .begin(&identity, tokens)
+        .await
+        .expect("session should open");
+
+    format!("{SESSION_COOKIE}={}", token.expose())
 }
 
 /// Reproduces what the login handler set, so the callback can be driven
@@ -318,7 +448,7 @@ async fn the_session_cookie_is_secure_outside_development() {
     config.environment = Environment::Production;
 
     let app = monorail_api::app(
-        AppState::new(config, Arc::new(StubAuth))
+        AppState::new(config, Arc::new(StubAuth), Arc::new(StubRailway::default()))
             .with_sessions(Arc::new(MemorySessions::default())),
     );
 
@@ -434,22 +564,7 @@ async fn an_unknown_session_cookie_is_not_a_login() {
 #[tokio::test]
 async fn a_logged_in_browser_reads_its_own_profile_and_can_log_out() {
     let (app, sessions) = app_with_login();
-
-    let login = raw(
-        &app,
-        get_with_cookie(
-            "/auth/railway/callback?code=code-ok&state=issued",
-            &pending_cookie("issued", "verifier"),
-        ),
-    )
-    .await;
-
-    let session_cookie = set_cookie_named(&login, SESSION_COOKIE)
-        .expect("session cookie should be set")
-        .split(';')
-        .next()
-        .expect("cookie should have a value")
-        .to_owned();
+    let session_cookie = log_in(&app).await;
 
     let (status, body) = send(&app, get_with_cookie("/api/v1/users/me", &session_cookie)).await;
 
@@ -477,4 +592,117 @@ async fn a_logged_in_browser_reads_its_own_profile_and_can_log_out() {
 
     let (status, _) = send(&app, get_with_cookie("/api/v1/users/me", &session_cookie)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn the_projects_endpoint_requires_a_session() {
+    let (app, _) = app_with_login();
+
+    let (status, body) = send(&app, get("/api/v1/projects")).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn a_logged_in_browser_reads_its_projects_and_their_services() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(&app, get_with_cookie("/api/v1/projects", &session_cookie)).await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let projects = body["projects"]
+        .as_array()
+        .expect("projects should be a list");
+    assert_eq!(projects.len(), 2);
+    assert_eq!(projects[0]["name"], "atlas");
+    assert_eq!(projects[0]["services"][1]["name"], "worker");
+    assert_eq!(
+        projects[1]["services"]
+            .as_array()
+            .expect("services should be a list")
+            .len(),
+        0,
+        "a project with no services is still a project"
+    );
+
+    assert_eq!(
+        railway.last_token().as_deref(),
+        Some("access-stub"),
+        "the session's own token should reach Railway"
+    );
+}
+
+/// A session outlives the access token it was opened with, so a stale one is
+/// renewed in place rather than logging the user out.
+#[tokio::test]
+async fn an_expired_access_token_is_renewed_before_railway_is_read() {
+    let (app, sessions, railway) = app_with_railway();
+
+    let cookie = session_cookie_with(
+        &sessions,
+        TokenSet {
+            access_token: Secret::new("access-spent"),
+            refresh_token: Some(Secret::new(StubAuth::REFRESHED)),
+            id_token: None,
+            scope: "openid email".to_owned(),
+            expires_at: chrono::Utc::now() - chrono::TimeDelta::seconds(1),
+        },
+    )
+    .await;
+
+    let (status, _) = send(&app, get_with_cookie("/api/v1/projects", &cookie)).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(railway.last_token().as_deref(), Some("access-renewed"));
+
+    let stored = sessions
+        .rows
+        .lock()
+        .expect("lock")
+        .values()
+        .next()
+        .expect("the session should still be there")
+        .tokens
+        .clone();
+
+    assert_eq!(stored.access_token.expose(), "access-renewed");
+    assert_eq!(
+        stored.refresh_token.as_ref().map(Secret::expose),
+        Some(StubAuth::REFRESHED),
+        "a provider that rotates nothing should not lose the refresh token"
+    );
+}
+
+/// A login that came back without a refresh token, or with one the provider no
+/// longer honours, has nothing left to renew: both send the browser back
+/// through a login rather than reporting a bad request.
+#[tokio::test]
+async fn an_unrenewable_access_token_asks_for_a_new_login() {
+    let (app, sessions, railway) = app_with_railway();
+
+    let expired = |refresh_token| TokenSet {
+        access_token: Secret::new("access-spent"),
+        refresh_token,
+        id_token: None,
+        scope: "openid email".to_owned(),
+        expires_at: chrono::Utc::now() - chrono::TimeDelta::seconds(1),
+    };
+
+    for tokens in [expired(None), expired(Some(Secret::new("refresh-revoked")))] {
+        let cookie = session_cookie_with(&sessions, tokens).await;
+
+        let (status, body) = send(&app, get_with_cookie("/api/v1/projects", &cookie)).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    assert_eq!(
+        railway.last_token(),
+        None,
+        "a spent token should never reach Railway"
+    );
 }

@@ -135,6 +135,14 @@ pub trait SessionStore: Send + Sync + 'static {
     /// expired. Expiry is enforced here rather than trusted from the cookie.
     async fn lookup(&self, token: &SessionToken) -> SessionResult<Option<Session>>;
 
+    /// Replaces the Railway tokens on a live session, after a refresh.
+    ///
+    /// Does not extend the session itself: how long a login lasts is this
+    /// service's decision and not the provider's. A token naming no session is
+    /// not an error — the session ended while the refresh was in flight, and
+    /// the caller has nothing left to write to.
+    async fn renew(&self, token: &SessionToken, tokens: &TokenSet) -> SessionResult<()>;
+
     /// Revokes a session. Absent is success: logging out twice is not an error.
     async fn end(&self, token: &SessionToken) -> SessionResult<()>;
 }
@@ -262,6 +270,22 @@ impl SessionStore for PgSessionStore {
                 }
             },
         ))
+    }
+
+    async fn renew(&self, token: &SessionToken, tokens: &TokenSet) -> SessionResult<()> {
+        let mut conn = self.database.conn().await?;
+
+        diesel::update(sessions::table.filter(sessions::token_hash.eq(token.digest())))
+            .set((
+                sessions::access_token.eq(tokens.access_token.expose()),
+                sessions::refresh_token.eq(tokens.refresh_token.as_ref().map(Secret::expose)),
+                sessions::scope.eq(&tokens.scope),
+                sessions::access_token_expires_at.eq(tokens.expires_at),
+            ))
+            .execute(&mut conn)
+            .await?;
+
+        Ok(())
     }
 
     async fn end(&self, token: &SessionToken) -> SessionResult<()> {

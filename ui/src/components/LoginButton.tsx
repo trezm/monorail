@@ -1,9 +1,6 @@
 import { useState } from 'react';
 
-// Only reached by a plain `pnpm dev` with no `.env`. Every Bazel build is
-// given the value, and one given an empty value fails in astro.config.mjs
-// rather than shipping this.
-const API_URL = import.meta.env.PUBLIC_API_URL ?? 'http://localhost:8080';
+import { LOGIN_URL } from '../lib/api';
 
 /**
  * Starts the Railway login.
@@ -20,7 +17,7 @@ export default function LoginButton() {
   return (
     <a
       className="login-button"
-      href={`${API_URL}/auth/railway`}
+      href={LOGIN_URL}
       aria-busy={redirecting}
       onClick={() => setRedirecting(true)}
     >

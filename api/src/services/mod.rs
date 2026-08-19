@@ -6,4 +6,5 @@
 pub mod auth;
 pub mod container;
 pub mod jwks;
+pub mod railway;
 pub mod session;

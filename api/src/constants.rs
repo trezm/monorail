@@ -50,6 +50,10 @@ pub const DEFAULT_RAILWAY_SCOPES: &str = "openid email profile project:member wo
 /// identity at all.
 pub const REQUIRED_RAILWAY_SCOPE: &str = "openid";
 
+/// Railway's public GraphQL API, relative to the issuer. Not configurable
+/// separately: a token minted against one host is worthless against another.
+pub const RAILWAY_GRAPHQL_PATH: &str = "graphql/v2";
+
 pub const DEFAULT_RAILWAY_TIMEOUT_SECS: u64 = 10;
 
 /// How long a login lasts. Two weeks trades a re-login against the window a

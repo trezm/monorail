@@ -213,9 +213,36 @@ to outlive the request that fetched it. They are stored in plaintext columns:
 that table is as sensitive as the database, and encrypting the columns is the
 obvious next step. Expired rows are not swept yet either.
 
-`CurrentUser` in [`src/extract.rs`](src/extract.rs) is how an endpoint requires
-a login — it costs one query, and rejects with `401` whether the cookie is
-absent, unknown or expired.
+`CurrentSession` in [`src/extract.rs`](src/extract.rs) is how an endpoint
+requires a login — it costs one query, and rejects with `401` whether the cookie
+is absent, unknown or expired. `CurrentUser` is the same extractor narrowed to
+the account; take it unless the handler needs the Railway tokens too.
+
+## Railway
+
+Logging in with Railway is only the means; acting on Railway afterwards is the
+point. [`src/services/railway.rs`](src/services/railway.rs) is that half:
+`RailwayApi` is the capability, `RailwayGraphQl` talks to
+`{issuer}/graphql/v2`, and the same trait-plus-stub arrangement keeps the route
+tests off the network.
+
+`GET /api/v1/projects` returns the caller's projects with their services nested
+inside, because one GraphQL query returns exactly that and asking twice would be
+two round trips for a shape the server already assembles.
+
+**Token renewal.** A session lasts two weeks and the access token it was opened
+with lasts about an hour, so [`src/routes/projects.rs`](src/routes/projects.rs)
+renews a spent token against the refresh token and writes the result back
+through `SessionStore::renew` before it calls Railway. A provider that returns
+no new refresh token has not revoked the old one, so the old one is kept — the
+alternative ends the session at the next expiry. A login that never got a
+refresh token, or one the provider has stopped honouring, is a `401`, which is
+what sends the browser back through a login rather than a `400` it can do
+nothing with.
+
+Renewal is per-request and unsynchronised: two requests arriving on the same
+expired session both refresh, and the second write wins. Both tokens work, so
+the cost is a wasted call rather than a broken session.
 
 ## Configuration
 
