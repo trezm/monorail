@@ -15,9 +15,10 @@ is signed in.
 | Path | |
 |---|---|
 | `src/pages/index.astro` | The only route. |
-| `src/components/LoginButton.tsx` | The button, hydrated with `client:load`. |
+| `src/components/App.tsx` | The one island, hydrated with `client:load`. |
+| `src/components/LoginButton.tsx` | The button. |
 | `src/components/UserMenu.tsx` | Name, avatar and log out, top right. |
-| `src/lib/session.ts` | Who is signed in, and how to stop being. |
+| `src/lib/session.tsx` | The session context, provider and hook. |
 | `src/styles/global.css` | Everything visual. No framework. |
 | `astro.config.mjs` | React integration, and the output paths Bazel overrides. |
 
@@ -29,17 +30,22 @@ acknowledging.
 
 ## The session
 
-The site is static, so the build knows nothing about who is looking at it. Every
-island asks `GET /api/v1/users/me` with `credentials: 'include'`, which is what
-attaches the session cookie across the two origins; `src/lib/session.ts` shares
-one request between them. A `401` is the ordinary answer for a visitor who has
-not logged in, not an error.
+The site is static, so the build knows nothing about who is looking at it and
+the browser has to ask. `SessionProvider` requests `GET /api/v1/users/me` once
+with `credentials: 'include'`, which is what attaches the session cookie across
+the two origins. A `401` is the ordinary answer for a visitor who has not logged
+in, not an error.
 
-That answer decides what renders: the account bar appears only with a session,
-the login button only without one, and neither renders while the question is
-still outstanding. Logging out is `DELETE /auth/session` — the cookie is
-`HttpOnly`, so the server is the only thing that can clear it — followed by a
-reload, which is cheaper than telling every island what changed.
+That answer decides what renders. `session.isSignedIn()` and
+`session.isSignedOut()` are not each other's negation — until the request
+answers, both are false — so the account bar and the login button each wait for
+their own answer instead of one of them showing to the wrong person.
+
+React context does not cross Astro island boundaries, so everything that reads
+the session lives under a single `client:load` island rather than one per
+component. That is what `App.tsx` is for, and it is why logging out needs no
+page reload: `DELETE /auth/session` clears the `HttpOnly` cookie server-side —
+nothing else can — and the provider then tells both components at once.
 
 ## Configuration
 

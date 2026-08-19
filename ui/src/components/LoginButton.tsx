@@ -18,7 +18,7 @@ export default function LoginButton() {
   const session = useSession();
   const [redirecting, setRedirecting] = useState(false);
 
-  if (session.status !== 'signed-out') return null;
+  if (!session.isSignedOut()) return null;
 
   return (
     <a
