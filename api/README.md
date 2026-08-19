@@ -160,14 +160,18 @@ the service runs with authentication disabled.
 
 | Route | |
 |---|---|
-| `GET /auth/railway/login` | mints `state` and a PKCE pair, sets the pending cookie, redirects to Railway |
+| `GET /auth/railway` | mints `state` and a PKCE pair, sets the pending cookie, redirects to Railway |
 | `GET /auth/railway/callback` | checks `state`, exchanges the code, reads the identity, opens a session |
-| `POST /auth/logout` | deletes the session row and clears the cookie |
-| `GET /api/v1/auth/me` | the logged-in user, or `401` |
+| `DELETE /auth/session` | deletes the session row and clears the cookie |
+| `GET /api/v1/users/me` | the logged-in user, or `401` |
+
+The session is the resource the first three act on. The callback keeps a path of
+its own because it is the redirect URI registered on the OAuth app, which has to
+match byte for byte.
 
 The first three are outside `/api/v1` because they are browser redirects, not a
-versioned API — the same reason `health` is. `me` is the one the UI calls, so it
-is versioned.
+versioned API — the same reason `health` is. The profile is the one the UI
+calls, so it is versioned.
 
 Two cookies. The pending cookie carries `state` and the PKCE verifier for the
 ten minutes between the redirect out and the callback back; comparing the

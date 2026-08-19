@@ -296,7 +296,7 @@ async fn unknown_routes_use_the_error_envelope() {
 async fn login_redirects_to_the_provider_and_remembers_the_attempt() {
     let (app, _) = app_with_login();
 
-    let response = raw(&app, get("/auth/railway/login")).await;
+    let response = raw(&app, get("/auth/railway")).await;
 
     assert_eq!(response.status(), StatusCode::SEE_OTHER);
     assert!(
@@ -325,7 +325,7 @@ async fn the_session_cookie_is_secure_outside_development() {
             .with_sessions(Arc::new(MemorySessions::default())),
     );
 
-    let response = raw(&app, get("/auth/railway/login")).await;
+    let response = raw(&app, get("/auth/railway")).await;
     let cookie = set_cookie_named(&response, PENDING_COOKIE).expect("pending cookie should be set");
 
     assert!(cookie.contains("Secure"), "got {cookie}");
@@ -415,7 +415,7 @@ async fn a_completed_callback_opens_a_session_and_clears_the_pending_cookie() {
 async fn the_profile_endpoint_requires_a_session() {
     let (app, _) = app_with_login();
 
-    let (status, body) = send(&app, get("/api/v1/auth/me")).await;
+    let (status, body) = send(&app, get("/api/v1/users/me")).await;
 
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"]["code"], "unauthorized");
@@ -427,7 +427,7 @@ async fn an_unknown_session_cookie_is_not_a_login() {
 
     let (status, _) = send(
         &app,
-        get_with_cookie("/api/v1/auth/me", &format!("{SESSION_COOKIE}=made-up")),
+        get_with_cookie("/api/v1/users/me", &format!("{SESSION_COOKIE}=made-up")),
     )
     .await;
 
@@ -454,7 +454,7 @@ async fn a_logged_in_browser_reads_its_own_profile_and_can_log_out() {
         .expect("cookie should have a value")
         .to_owned();
 
-    let (status, body) = send(&app, get_with_cookie("/api/v1/auth/me", &session_cookie)).await;
+    let (status, body) = send(&app, get_with_cookie("/api/v1/users/me", &session_cookie)).await;
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["email"], "jane@example.test");
@@ -467,8 +467,8 @@ async fn a_logged_in_browser_reads_its_own_profile_and_can_log_out() {
     let logout = raw(
         &app,
         Request::builder()
-            .method("POST")
-            .uri("/auth/logout")
+            .method("DELETE")
+            .uri("/auth/session")
             .header(header::COOKIE, &session_cookie)
             .body(Body::empty())
             .expect("bad request"),
@@ -478,6 +478,6 @@ async fn a_logged_in_browser_reads_its_own_profile_and_can_log_out() {
     assert_eq!(logout.status(), StatusCode::NO_CONTENT);
     assert!(sessions.rows.lock().expect("lock").is_empty());
 
-    let (status, _) = send(&app, get_with_cookie("/api/v1/auth/me", &session_cookie)).await;
+    let (status, _) = send(&app, get_with_cookie("/api/v1/users/me", &session_cookie)).await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
 }

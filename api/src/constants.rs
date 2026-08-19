@@ -55,7 +55,7 @@ pub const DEFAULT_RAILWAY_TIMEOUT_SECS: u64 = 10;
 /// How long a login lasts. Two weeks trades a re-login against the window a
 /// stolen cookie stays useful; sessions are revocable either way, since the
 /// row and not the cookie is the authority.
-pub const DEFAULT_SESSION_TTL_SECS: u64 = 14 * 24 * 60 * 60;
+pub const DEFAULT_SESSION_TTL_SECS: u64 = 14 * 24 * 60 * 60; // 14 days
 
 /// Where a finished login sends the browser. The default is the Astro dev
 /// server, which is what a local checkout runs.

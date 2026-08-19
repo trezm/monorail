@@ -23,6 +23,7 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use chrono::{DateTime, TimeDelta, Utc};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest as _, Sha256};
+use subtle::ConstantTimeEq as _;
 use url::Url;
 
 use crate::{
@@ -100,7 +101,7 @@ impl CsrfState {
     /// of how many leading characters happen to match.
     #[must_use]
     pub fn matches(&self, candidate: &str) -> bool {
-        constant_time_eq(self.0.as_bytes(), candidate.as_bytes())
+        self.0.as_bytes().ct_eq(candidate.as_bytes()).into()
     }
 }
 
@@ -402,17 +403,6 @@ fn token_error(status: reqwest::StatusCode, body: &[u8]) -> AuthError {
                 .unwrap_or_default()
         )),
     }
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-
-    left.iter()
-        .zip(right)
-        .fold(0u8, |difference, (a, b)| difference | (a ^ b))
-        == 0
 }
 
 #[cfg(test)]

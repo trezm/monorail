@@ -1,8 +1,8 @@
 //! Login with Railway.
 //!
 //! These sit outside `/api/v1` because they are browser redirects rather than a
-//! versioned JSON API — the same reason `health` does. The one exception is
-//! [`api_router`], which serves `/api/v1/auth/me` for the UI to call.
+//! versioned JSON API — the same reason `health` does. The signed-in user is a
+//! resource rather than a redirect, so it lives in [`crate::routes::users`].
 //!
 //! Two cookies carry the flow. The pending cookie holds the `state` and the
 //! PKCE verifier for the ten minutes between the redirect out and the callback
@@ -27,19 +27,18 @@ use axum::{
     extract::State,
     http::StatusCode,
     response::Redirect,
-    routing::{get, post},
+    routing::{delete, get},
 };
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
-use serde::{Deserialize, Serialize};
-use uuid::Uuid;
+use serde::Deserialize;
 
 use crate::{
     config::Config,
     error::ApiResult,
-    extract::{CurrentUser, Json, Query},
+    extract::Query,
     services::{
         auth::{AuthError, CsrfState, Pkce},
-        session::{SessionToken, User},
+        session::SessionToken,
     },
     state::AppState,
 };
@@ -59,40 +58,17 @@ const PENDING_PATH: &str = "/auth";
 /// pending cookie lets someone restart their own login and nothing else.
 const PENDING_TTL: time::Duration = time::Duration::minutes(10);
 
-/// The browser-facing half: redirects, not JSON.
+/// Browser redirects, not JSON.
+///
+/// The session is the resource: `GET /auth/railway` starts one, the callback
+/// completes it, and `DELETE /auth/session` ends it. The callback keeps its
+/// path because it is the redirect URI registered on the OAuth app, which has
+/// to match byte for byte.
 pub fn router() -> Router<AppState> {
     Router::new()
-        .route("/auth/railway/login", get(login))
+        .route("/auth/railway", get(login))
         .route("/auth/railway/callback", get(callback))
-        .route("/auth/logout", post(logout))
-}
-
-/// The half that belongs under `/api/v1`, for the UI to call.
-pub fn api_router() -> Router<AppState> {
-    Router::new().route("/auth/me", get(me))
-}
-
-/// What `/api/v1/auth/me` returns.
-///
-/// Deliberately not the [`User`] row: a response shape that grows a column
-/// every time the table does is how internals leak.
-#[derive(Debug, Serialize)]
-pub struct Profile {
-    pub id: Uuid,
-    pub email: Option<String>,
-    pub name: Option<String>,
-    pub avatar_url: Option<String>,
-}
-
-impl From<User> for Profile {
-    fn from(user: User) -> Self {
-        Self {
-            id: user.id,
-            email: user.email,
-            name: user.name,
-            avatar_url: user.avatar_url,
-        }
-    }
+        .route("/auth/session", delete(logout))
 }
 
 /// The callback's query string. Success and failure are mutually exclusive, but
@@ -177,10 +153,6 @@ async fn logout(
         jar.remove(removal(state.config(), SESSION_COOKIE, "/")),
         StatusCode::NO_CONTENT,
     ))
-}
-
-async fn me(CurrentUser(user): CurrentUser) -> Json<Profile> {
-    Json(user.into())
 }
 
 /// The provider redirected back with a refusal rather than a code (RFC 6749
