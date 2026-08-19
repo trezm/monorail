@@ -27,6 +27,10 @@ DEPS = [
 
 # `bazel build //ui` produces the static site.
 #
+# PUBLIC_API_URL is passed in rather than read from `ui/.env`: a file that is
+# not a declared input does not exist inside the sandbox, so Astro would never
+# see it and the site would ship the fallback. See //.bazelrc for the default.
+#
 # Astro writes its generated types and its Vite cache next to the sources,
 # which are read-only inside the sandbox, so both are redirected into the
 # node_modules tree Bazel materialised. astro.config.mjs reads these.
@@ -38,6 +42,7 @@ astro_bin.astro(
     env = {
         "ASTRO_CACHE_DIR": "node_modules/.astro",
         "ASTRO_OUT_DIR": "dist",
+        "PUBLIC_API_URL": "$(PUBLIC_API_URL)",
     },
     out_dirs = ["dist"],
 )
@@ -58,6 +63,9 @@ js_run_devserver(
     name = "dev",
     args = ["dev"],
     data = SRCS + DEPS,
-    env = {"ASTRO_DEV_BACKGROUND": "1"},
+    env = {
+        "ASTRO_DEV_BACKGROUND": "1",
+        "PUBLIC_API_URL": "$(PUBLIC_API_URL)",
+    },
     tool = ":astro",
 )
