@@ -1,21 +1,17 @@
 //! Postgres access.
 //!
-//! One [`Database`] lives in [`AppState`](crate::state::AppState) and is shared
-//! by every handler. It owns a [`bb8`] pool of [`AsyncPgConnection`]s, which
-//! speak the wire protocol over `tokio-postgres` — there is no libpq to link,
-//! so the Bazel build stays hermetic and the eventual deployment image needs no
-//! system packages.
-//!
-//! Handlers check out a connection per query and drop it as soon as they are
-//! done:
+//! One [`Database`] lives in [`AppState`](crate::state::AppState) and holds a
+//! [`bb8`] pool of [`AsyncPgConnection`]s. Only diesel's `postgres_backend`
+//! feature is enabled — `postgres` would link libpq — so all io is
+//! tokio-postgres and the build stays pure Rust.
 //!
 //! ```ignore
 //! let mut conn = state.db().conn().await?;
 //! let rows = some_table::table.load::<Row>(&mut conn).await?;
 //! ```
 //!
-//! Holding one across an `.await` that does something else — an HTTP call, a
-//! lock — is how a pool of ten deadlocks under eleven concurrent requests.
+//! Do not hold a connection across an unrelated `.await`: a pool of ten
+//! deadlocks under eleven concurrent requests that do.
 
 use std::fmt;
 
@@ -29,8 +25,7 @@ use diesel_migrations::{EmbeddedMigrations, MigrationHarness as _, embed_migrati
 use crate::{config::Config, error::ApiError};
 
 /// Every `.sql` file under `api/migrations`, baked into the binary at compile
-/// time so a deployed artifact carries its own schema history and needs no
-/// diesel-cli alongside it.
+/// time so a deployed artifact needs no diesel-cli alongside it.
 ///
 /// Under Bazel this needs `compile_data` and a `CARGO_MANIFEST_DIR` in
 /// `rustc_env`; see `api/BUILD.bazel`.
@@ -44,19 +39,13 @@ pub type PooledConnection<'a> = bb8::PooledConnection<'a, AsyncPgConnection>;
 
 pub type DbResult<T> = Result<T, DbError>;
 
-/// What can go wrong when talking to Postgres.
-///
-/// The split is the one that matters to a caller: [`Self::Unavailable`] means
-/// the request never reached the database and is worth retrying,
-/// [`Self::Query`] means it did and the statement itself failed.
+/// [`Self::Unavailable`] means the query never reached Postgres and is worth
+/// retrying; [`Self::Query`] means it did and the statement failed.
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
-    /// No connection could be checked out: the pool timed out, or Postgres
-    /// refused or dropped the connection.
     #[error("could not obtain a database connection")]
     Unavailable(#[source] anyhow::Error),
 
-    /// The statement reached Postgres and failed.
     #[error(transparent)]
     Query(#[from] diesel::result::Error),
 }
@@ -71,10 +60,9 @@ impl From<DbError> for ApiError {
     fn from(error: DbError) -> Self {
         match error {
             DbError::Unavailable(source) => Self::Unavailable(source),
-            // Deliberately not mapping `Error::NotFound` to a 404: whether an
-            // empty result is "this resource does not exist" or a broken
-            // invariant depends on the query, and only the call site knows
-            // which. Match on it there and return `ApiError::not_found`.
+            // `Error::NotFound` is deliberately not a 404: only the call site
+            // knows whether an empty result is a missing resource or a broken
+            // invariant. Match on it there and return `ApiError::not_found`.
             DbError::Query(source) => Self::Internal(source.into()),
         }
     }
@@ -87,13 +75,10 @@ pub struct Database {
 }
 
 impl Database {
-    /// Builds the pool.
-    ///
-    /// Nothing connects here — bb8 opens connections lazily on first use — so
-    /// this is infallible and synchronous. That is what lets tests build a real
-    /// [`AppState`](crate::state::AppState) without a database anywhere near
-    /// them. Call [`Self::ping`] to find out whether the database is actually
-    /// reachable; [`run`](crate::run) does exactly that before it binds a port.
+    /// Builds the pool. bb8 connects lazily, so this is infallible and needs no
+    /// database — which is what lets tests build a real
+    /// [`AppState`](crate::state::AppState). [`run`](crate::run) calls
+    /// [`Self::ping`] at startup to check reachability.
     #[must_use]
     pub fn new(config: &Config) -> Self {
         let manager =
@@ -118,27 +103,20 @@ impl Database {
         Ok(self.pool.get().await?)
     }
 
-    /// Round-trips a trivial statement. Used by the readiness probe, which
-    /// wants to know that a *usable* connection exists — a pool that has never
-    /// dialled out looks healthy right up until the first real query.
+    /// Round-trips `SELECT 1`. A pool that has never dialled out looks healthy,
+    /// so the readiness probe needs a real query rather than pool statistics.
     pub async fn ping(&self) -> DbResult<()> {
         let mut conn = self.conn().await?;
         diesel::sql_query("SELECT 1").execute(&mut conn).await?;
         Ok(())
     }
 
-    /// Applies every migration in [`MIGRATIONS`] that has not run yet, and
-    /// returns the versions it applied.
+    /// Applies pending migrations and returns the versions applied.
     ///
-    /// Diesel's migration machinery is synchronous, so the harness parks it on
-    /// a blocking thread via `block_in_place`. That requires the multi-threaded
-    /// tokio runtime — which is what `#[tokio::main]` gives the binary, but not
-    /// what `#[tokio::test]` gives a test. Annotate any test that migrates with
-    /// `#[tokio::test(flavor = "multi_thread")]`.
-    ///
-    /// Runs on a connection opened outside the pool: applying a migration can
-    /// take as long as the DDL takes, and a pool slot held that long is a slot
-    /// requests are queueing for.
+    /// Uses a connection opened outside the pool, since DDL can hold one for a
+    /// long time. Diesel's migration code is synchronous and the harness parks
+    /// it with `block_in_place`, so this needs the multi-threaded runtime: a
+    /// test that migrates must say `#[tokio::test(flavor = "multi_thread")]`.
     pub async fn migrate(&self) -> anyhow::Result<Vec<String>> {
         let conn = self
             .pool
@@ -157,8 +135,8 @@ impl Database {
     }
 }
 
-/// Hand-written so the connection string — which carries a password — cannot
-/// reach a log through a `#[derive(Debug)]` on this or anything holding it.
+/// Hand-written: a derived impl would print the pool's manager, and the
+/// connection string in it carries a password.
 impl fmt::Debug for Database {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Database")
@@ -173,10 +151,8 @@ mod tests {
 
     use super::MIGRATIONS;
 
-    /// Guards the build wiring, not the SQL. `embed_migrations!` resolves its
-    /// directory at compile time, so under Bazel it depends on `compile_data`
-    /// and `rustc_env` in `api/BUILD.bazel` being right. Get those wrong and
-    /// the binary links fine and migrates nothing.
+    /// Guards the Bazel wiring, not the SQL: get `compile_data` or `rustc_env`
+    /// wrong and the binary links fine and migrates nothing.
     #[test]
     fn migrations_are_embedded() {
         let migrations = MigrationSource::<Pg>::migrations(&MIGRATIONS)

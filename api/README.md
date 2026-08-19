@@ -24,6 +24,7 @@ The service requires Postgres and refuses to start without it. See
 | `src/state.rs` | `AppState`, one `Arc` around everything shared. |
 | `src/telemetry.rs` | Tracing subscriber setup. |
 | `src/shutdown.rs` | SIGINT/SIGTERM handling. |
+| `src/bin/migrate.rs` | Applies pending migrations and exits. |
 | `src/routes/` | HTTP handlers, one module per resource. |
 | `src/services/` | Business logic, one trait per capability. |
 | `migrations/` | Schema history, embedded into the binary. |
@@ -112,9 +113,16 @@ diesel-cli generates the same layout (`cd api && diesel migration generate
 add_things`) if you have it; it is not required, and installing it pulls in
 libpq.
 
-Applying them is `API_DATABASE_MIGRATE_ON_START=true`, which `tools/stack.sh up`
-sets. It is off by default because in a rolling deploy every replica would race
-to run them — that wants a single job, not a startup hook.
+Applying them is a separate binary, [`src/bin/migrate.rs`](src/bin/migrate.rs):
+
+```bash
+bazel run //api:migrate
+```
+
+It reads the same `API_DATABASE_URL` and the same embedded migrations as the
+server, so there is no second source of truth. The server deliberately does not
+migrate on startup — in a rolling deploy every replica would race to run them,
+so this wants to be one job per deploy.
 
 ## Configuration
 

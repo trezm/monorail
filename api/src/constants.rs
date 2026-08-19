@@ -16,7 +16,6 @@ pub const DATABASE_URL: &str = "API_DATABASE_URL";
 pub const DATABASE_URL_FALLBACK: &str = "DATABASE_URL";
 pub const DATABASE_POOL_SIZE: &str = "API_DATABASE_POOL_SIZE";
 pub const DATABASE_CONNECT_TIMEOUT_SECS: &str = "API_DATABASE_CONNECT_TIMEOUT_SECS";
-pub const DATABASE_MIGRATE_ON_START: &str = "API_DATABASE_MIGRATE_ON_START";
 
 pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_LOG_FILTER: &str = "info,tower_http=debug,monorail_api=debug";

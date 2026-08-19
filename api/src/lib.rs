@@ -95,9 +95,9 @@ pub fn app(state: AppState) -> Router {
 /// Postgres is reached before the listener is bound, so a bad connection string
 /// or an unreachable database is a startup failure with a readable message
 /// rather than a process that accepts traffic and answers `503` to all of it.
+/// Migrations are not run here — that is `//api:migrate`.
 pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.host, config.port));
-    let migrate = config.database_migrate_on_start;
     let state = AppState::new(config);
 
     state.db().ping().await.with_context(|| {
@@ -107,16 +107,6 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         )
     })?;
     tracing::info!(database = %state.config().database_url.redacted(), "database connected");
-
-    if migrate {
-        let applied = state.db().migrate().await?;
-
-        if applied.is_empty() {
-            tracing::info!("database schema is up to date");
-        } else {
-            tracing::info!(versions = ?applied, count = applied.len(), "applied migrations");
-        }
-    }
 
     let app = app(state);
 

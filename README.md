@@ -46,8 +46,9 @@ bazel build --config=release //api
 [`tools/stack.sh`](tools/stack.sh) runs Postgres and the API together.
 
 ```bash
-tools/stack.sh up      # Postgres, then the API in the foreground
+tools/stack.sh up      # Postgres, migrations, then the API in the foreground
 tools/stack.sh db      # Postgres alone — run the API yourself
+tools/stack.sh migrate # apply pending migrations and exit
 tools/stack.sh down    # stop Postgres; the data volume survives
 tools/stack.sh reset   # stop Postgres and delete the data volume
 tools/stack.sh psql    # a shell on the running database
@@ -57,8 +58,8 @@ Only the database is containerized ([`compose.yaml`](compose.yaml)). The API
 runs on the host out of `bazel run //api`, because building Rust in a container
 costs a full non-incremental compile on every edit — minutes against Bazel's
 seconds — and gains nothing while there is no container packaging to test
-against. `up` also applies migrations on the way up, which is safe there because
-it is a single process that owns the database.
+against. `up` also runs `bazel run //api:migrate` first; the server itself never
+migrates on startup.
 
 Ctrl-C stops the API and leaves Postgres running; `down` stops that too. The
 API's development defaults already point at this database, so there is nothing

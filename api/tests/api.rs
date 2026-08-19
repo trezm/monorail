@@ -35,7 +35,6 @@ fn test_config() -> Config {
         database_url: DatabaseUrl::new("postgres://unused@127.0.0.1:1/unused"),
         database_pool_size: 1,
         database_connect_timeout: std::time::Duration::from_millis(50),
-        database_migrate_on_start: false,
     }
 }
 

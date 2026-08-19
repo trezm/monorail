@@ -172,10 +172,6 @@ pub struct Config {
     /// How long a request waits for a pooled connection before giving up. This
     /// covers queueing behind a busy pool as well as opening a new connection.
     pub database_connect_timeout: Duration,
-    /// Whether to apply pending migrations during startup. Convenient for the
-    /// local stack; off by default, because in a rolling deploy every replica
-    /// would race to run them.
-    pub database_migrate_on_start: bool,
 }
 
 impl Config {
@@ -231,7 +227,6 @@ impl Config {
                 constants::DATABASE_CONNECT_TIMEOUT_SECS,
                 constants::DEFAULT_DATABASE_CONNECT_TIMEOUT_SECS,
             )?),
-            database_migrate_on_start: parsed(constants::DATABASE_MIGRATE_ON_START, false)?,
         })
     }
 }

@@ -1,17 +1,18 @@
 #!/usr/bin/env bash
 # Bring up the local test stack: Postgres in Docker, the API on the host.
 #
-#   tools/stack.sh up       # Postgres, then the API in the foreground
+#   tools/stack.sh up       # Postgres, migrations, then the API in the foreground
 #   tools/stack.sh db       # Postgres alone, detached
 #   tools/stack.sh down     # stop Postgres; the data volume survives
 #   tools/stack.sh reset    # stop Postgres and delete the data volume
+#   tools/stack.sh migrate  # apply pending migrations and exit
 #   tools/stack.sh psql     # a psql shell on the running database
 #   tools/stack.sh logs     # follow Postgres logs
 #   tools/stack.sh status   # what is running
 #
 # Only the database is containerized. Building the API in a container means a
 # full non-incremental Cargo compile on every edit, which is minutes against
-# Bazel's seconds — so `up` starts Postgres, waits for it, and then execs
+# Bazel's seconds — so `up` starts Postgres, migrates, and then execs
 # `bazel run //api` in the foreground. Ctrl-C stops the API and leaves the
 # database running; `down` stops that too.
 
@@ -40,13 +41,13 @@ start_postgres() { docker compose up --detach --wait postgres; }
 case "${1:-}" in
 up)
     start_postgres
+    bazel run //api:migrate
     echo
     echo "Postgres ${URL}"
     echo "Starting the API on http://localhost:8080 — Ctrl-C to stop it."
     echo
-    # Migrations are unambiguously safe here: one process, and it owns the
-    # database. exec so Ctrl-C reaches the server's own shutdown handler.
-    exec env API_DATABASE_MIGRATE_ON_START=true bazel run //api
+    # exec so Ctrl-C reaches the server's own shutdown handler.
+    exec bazel run //api
     ;;
 db)
     start_postgres
@@ -54,10 +55,10 @@ db)
     echo "Postgres is up at ${URL}"
     echo "Run the API against it with:"
     echo
+    echo "    bazel run //api:migrate    # once, after adding a migration"
     echo "    bazel run //api"
     echo
-    echo "Nothing to export: that URL is the development default. Apply"
-    echo "migrations on the way up with API_DATABASE_MIGRATE_ON_START=true."
+    echo "Nothing to export: that URL is the development default."
     ;;
 down)
     docker compose down
@@ -65,6 +66,10 @@ down)
 reset)
     docker compose down --volumes
     echo "Data volume deleted; the next start re-runs initdb."
+    ;;
+migrate)
+    start_postgres
+    bazel run //api:migrate
     ;;
 psql)
     docker compose exec postgres psql -U monorail -d monorail
