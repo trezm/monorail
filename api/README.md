@@ -25,6 +25,7 @@ The service requires Postgres and refuses to start without it. See
 | `src/telemetry.rs` | Tracing subscriber setup. |
 | `src/shutdown.rs` | SIGINT/SIGTERM handling. |
 | `src/bin/migrate.rs` | Applies pending migrations and exits. |
+| `src/secret.rs` | A wrapper that keeps a string out of logs. |
 | `src/routes/` | HTTP handlers, one module per resource. |
 | `src/services/` | Business logic, one trait per capability. |
 | `migrations/` | Schema history, embedded into the binary. |
@@ -123,6 +124,36 @@ It reads the same `API_DATABASE_URL` and the same embedded migrations as the
 server, so there is no second source of truth. The server deliberately does not
 migrate on startup — in a rolling deploy every replica would race to run them,
 so this wants to be one job per deploy.
+
+## Authentication
+
+Users log in through Railway, which acts as an OAuth 2.0 and OpenID Connect
+provider. [`src/services/auth.rs`](src/services/auth.rs) implements the flow:
+`AuthProvider` is the trait that describes the capability, and `RailwayAuth`
+is the implementation.
+
+**The flow.** The service uses the authorization code flow with PKCE. It sends
+the `S256` challenge method, because that is the only method Railway supports.
+It builds every Railway endpoint from the issuer URL in the configuration, so a
+test can point the issuer at a local server and run the whole flow without
+reaching the network.
+
+**ID token signatures.** The service does not verify the ID token's signature,
+and it ships no JWKS client. Two things make that safe. First, the token set
+never passes through the browser: the service fetches it over TLS in a direct
+call to the token endpoint and authenticates itself in that call, which OpenID
+Connect Core §3.1.3.7 exempts from the signature check. Second, the service
+reads the user's identity from the userinfo endpoint, so no code parses the
+JWT.
+
+**Configuration.** The client ID, client secret and redirect URI are
+required. If any of them is missing, the service fails at startup and names the
+one it wanted. Nothing here works without a login, so there is no mode in which
+the service runs with authentication disabled.
+
+**Secrets in logs.** The code wraps tokens and the `state` value in
+[`Secret`](src/secret.rs), or gives them a `Debug` that redacts them. A
+`?config` field, a panic message or an error report therefore cannot print one.
 
 ## Configuration
 

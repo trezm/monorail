@@ -12,7 +12,9 @@ use std::{
     time::Duration,
 };
 
-use crate::constants;
+use url::Url;
+
+use crate::{constants, secret::Secret};
 
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -20,6 +22,8 @@ pub enum ConfigError {
     NotUnicode { key: String },
     #[error("{key} must be set outside development")]
     Missing { key: String },
+    #[error("{key} must be set")]
+    Required { key: String },
     #[error("{key}=\"{value}\" could not be parsed: {source}")]
     Invalid {
         key: String,
@@ -172,6 +176,26 @@ pub struct Config {
     /// How long a request waits for a pooled connection before giving up. This
     /// covers queueing behind a busy pool as well as opening a new connection.
     pub database_connect_timeout: Duration,
+    pub railway_oauth: OAuthConfig,
+}
+
+/// Everything a login against Railway needs.
+///
+/// The client id, client secret and redirect URI have no defensible default
+/// and are required. There is nothing to do with this service without a login,
+/// so a missing one is a startup error rather than a disabled feature.
+#[derive(Debug, Clone)]
+pub struct OAuthConfig {
+    /// Base URL of the provider, always with a trailing slash so joining a
+    /// relative endpoint path cannot eat a path segment.
+    pub issuer: Url,
+    pub client_id: String,
+    pub client_secret: Secret,
+    /// Must byte-for-byte match a redirect URI registered on the OAuth app.
+    pub redirect_uri: String,
+    pub scopes: Vec<String>,
+    /// Wall-clock budget for one call to the provider.
+    pub timeout: Duration,
 }
 
 impl Config {
@@ -227,6 +251,7 @@ impl Config {
                 constants::DATABASE_CONNECT_TIMEOUT_SECS,
                 constants::DEFAULT_DATABASE_CONNECT_TIMEOUT_SECS,
             )?),
+            railway_oauth: railway_oauth()?,
         })
     }
 }
@@ -252,6 +277,78 @@ fn database_url(environment: Environment) -> Result<DatabaseUrl, ConfigError> {
             key: constants::DATABASE_URL.to_owned(),
         }),
     }
+}
+
+/// Assembles the Railway OAuth settings.
+fn railway_oauth() -> Result<OAuthConfig, ConfigError> {
+    Ok(OAuthConfig {
+        issuer: issuer()?,
+        client_id: required(constants::RAILWAY_CLIENT_ID)?,
+        client_secret: Secret::new(required(constants::RAILWAY_CLIENT_SECRET)?),
+        redirect_uri: required(constants::RAILWAY_REDIRECT_URI)?,
+        scopes: scopes()?,
+        timeout: Duration::from_secs(parsed(
+            constants::RAILWAY_TIMEOUT_SECS,
+            constants::DEFAULT_RAILWAY_TIMEOUT_SECS,
+        )?),
+    })
+}
+
+/// Normalises the issuer to end in `/`. Without that, `Url::join("oauth/token")`
+/// replaces the issuer's last path segment instead of appending to it.
+fn issuer() -> Result<Url, ConfigError> {
+    let configured: String = parsed(
+        constants::RAILWAY_ISSUER,
+        constants::DEFAULT_RAILWAY_ISSUER.to_owned(),
+    )?;
+
+    let base = format!("{}/", configured.trim_end_matches('/'));
+
+    base.parse()
+        .map_err(|source: url::ParseError| ConfigError::Invalid {
+            key: constants::RAILWAY_ISSUER.to_owned(),
+            value: configured,
+            source: source.to_string().into(),
+        })
+}
+
+/// Scopes are space-separated on the wire; commas are accepted too because
+/// every other list-valued variable here uses them.
+fn scopes() -> Result<Vec<String>, ConfigError> {
+    let configured: String = parsed(
+        constants::RAILWAY_SCOPES,
+        constants::DEFAULT_RAILWAY_SCOPES.to_owned(),
+    )?;
+
+    let scopes: Vec<String> = configured
+        .split([',', ' ', '\t', '\n'])
+        .filter(|scope| !scope.is_empty())
+        .map(ToOwned::to_owned)
+        .collect();
+
+    if !scopes
+        .iter()
+        .any(|scope| scope == constants::REQUIRED_RAILWAY_SCOPE)
+    {
+        return Err(ConfigError::Invalid {
+            key: constants::RAILWAY_SCOPES.to_owned(),
+            value: configured,
+            source: format!(
+                "OpenID Connect requires the `{}` scope",
+                constants::REQUIRED_RAILWAY_SCOPE
+            )
+            .into(),
+        });
+    }
+
+    Ok(scopes)
+}
+
+/// Reads `key`, failing when it is absent.
+fn required(key: &str) -> Result<String, ConfigError> {
+    present(key)?.ok_or_else(|| ConfigError::Required {
+        key: key.to_owned(),
+    })
 }
 
 /// Reads `key`, treating unset and empty-after-trim alike. An exported-but-empty
