@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
 import NewServiceForm from './NewServiceForm';
+import ProjectServices from './ProjectServices';
 import { projects, SessionExpired, type Project, type Service } from '../lib/projects';
 import { useSession } from '../lib/session';
 
@@ -110,18 +111,7 @@ export default function ProjectList() {
             {project.services.length === 0 ? (
               <p className="project__empty">No services in this project.</p>
             ) : (
-              <ul className="services">
-                {project.services.map((service) => (
-                  <li key={service.id} className="service">
-                    <span className="service__name">{service.name}</span>
-                    {service.created_at && (
-                      <time className="service__created" dateTime={service.created_at}>
-                        {formatDate(service.created_at)}
-                      </time>
-                    )}
-                  </li>
-                ))}
-              </ul>
+              <ProjectServices project={project} active={expanded.has(project.id)} />
             )}
 
             <NewServiceForm
@@ -133,13 +123,4 @@ export default function ProjectList() {
       ))}
     </ul>
   );
-}
-
-/** Falls back to the raw value rather than rendering `Invalid Date`. */
-function formatDate(value: string) {
-  const parsed = new Date(value);
-
-  return Number.isNaN(parsed.valueOf())
-    ? value
-    : parsed.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
 }

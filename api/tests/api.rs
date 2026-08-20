@@ -22,7 +22,10 @@ use monorail_api::{
     routes::auth::{PENDING_COOKIE, SESSION_COOKIE},
     services::{
         auth::{AuthError, AuthProvider, AuthResult, CsrfState, Pkce, RailwayIdentity, TokenSet},
-        railway::{Project, RailwayApi, RailwayError, RailwayResult, Service, ServiceSource},
+        railway::{
+            Deployment, Environment as RailwayEnvironment, Project, RailwayApi, RailwayError,
+            RailwayResult, Service, ServiceInstance, ServiceSource,
+        },
         session::{Session, SessionResult, SessionStore, SessionToken, User},
     },
 };
@@ -358,6 +361,68 @@ impl RailwayApi for StubRailway {
             id: "service-new".to_owned(),
             name: "shiny-new-service".to_owned(),
             created_at: None,
+        })
+    }
+
+    /// Echoes the project id into the environment ids, so a test can assert the
+    /// path parameter reached the stub.
+    async fn environments(
+        &self,
+        access_token: &Secret,
+        project_id: &str,
+    ) -> RailwayResult<Vec<RailwayEnvironment>> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push(access_token.expose().to_owned());
+
+        Ok(vec![
+            RailwayEnvironment {
+                id: format!("{project_id}:production"),
+                name: "production".to_owned(),
+                created_at: None,
+            },
+            RailwayEnvironment {
+                id: format!("{project_id}:staging"),
+                name: "staging".to_owned(),
+                created_at: None,
+            },
+        ])
+    }
+
+    /// `env-empty` is the environment nothing is deployed in.
+    async fn service_instance(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+    ) -> RailwayResult<ServiceInstance> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push(access_token.expose().to_owned());
+
+        if environment_id == "env-empty" {
+            return Err(RailwayError::NotFound(format!(
+                "service `{service_id}` has no instance in `{environment_id}`"
+            )));
+        }
+
+        Ok(ServiceInstance {
+            id: format!("{service_id}:{environment_id}"),
+            start_command: Some("bazel run //api".to_owned()),
+            build_command: None,
+            root_directory: None,
+            healthcheck_path: Some("/health/ready".to_owned()),
+            region: Some("us-west2".to_owned()),
+            num_replicas: Some(2),
+            restart_policy_type: Some("ON_FAILURE".to_owned()),
+            restart_policy_max_retries: Some(10),
+            latest_deployment: Some(Deployment {
+                id: "deploy-1".to_owned(),
+                status: "SUCCESS".to_owned(),
+                created_at: None,
+            }),
         })
     }
 }
@@ -819,6 +884,111 @@ async fn railways_rejection_reaches_the_caller() {
 
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["message"], "Project not found");
+}
+
+#[tokio::test]
+async fn the_environments_endpoint_requires_a_session() {
+    let (app, _) = app_with_login();
+
+    let (status, body) = send(&app, get("/api/v1/projects/project-1/environments")).await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn a_logged_in_browser_reads_a_projects_environments() {
+    let (app, _) = app_with_login();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        get_with_cookie("/api/v1/projects/project-1/environments", &session_cookie),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+
+    let environments = body["environments"]
+        .as_array()
+        .expect("environments should be a list");
+    assert_eq!(environments.len(), 2);
+    assert_eq!(environments[0]["name"], "production");
+    assert_eq!(
+        environments[0]["id"], "project-1:production",
+        "the project id in the path should reach Railway"
+    );
+}
+
+#[tokio::test]
+async fn the_instance_endpoint_requires_a_session() {
+    let (app, _) = app_with_login();
+
+    let (status, body) = send(
+        &app,
+        get("/api/v1/services/service-1/instance?environment=env-1"),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn a_logged_in_browser_reads_a_services_instance() {
+    let (app, _) = app_with_login();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        get_with_cookie(
+            "/api/v1/services/service-1/instance?environment=env-1",
+            &session_cookie,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        body["id"], "service-1:env-1",
+        "both identifiers should reach Railway"
+    );
+    assert_eq!(body["region"], "us-west2");
+    assert_eq!(body["num_replicas"], 2);
+    assert_eq!(body["latest_deployment"]["status"], "SUCCESS");
+}
+
+#[tokio::test]
+async fn a_service_missing_from_an_environment_is_not_found() {
+    let (app, _) = app_with_login();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        get_with_cookie(
+            "/api/v1/services/service-1/instance?environment=env-empty",
+            &session_cookie,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn an_instance_request_without_an_environment_is_rejected() {
+    let (app, _) = app_with_login();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        get_with_cookie("/api/v1/services/service-1/instance", &session_cookie),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
 }
 
 /// A session outlives the access token it was opened with, so a stale one is

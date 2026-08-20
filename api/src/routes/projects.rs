@@ -1,4 +1,4 @@
-//! The signed-in user's Railway projects.
+//! The signed-in user's Railway projects, and their environments.
 
 use axum::{
     Router,
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
     error::{ApiError, ApiResult},
     extract::{CurrentSession, Json, Path},
-    services::railway::{Project, Service, ServiceSource},
+    services::railway::{Environment, Project, Service, ServiceSource},
     state::AppState,
 };
 
@@ -19,6 +19,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/projects", get(list))
         .route("/projects/{project_id}/services", post(create_service))
+        .route("/projects/{project_id}/environments", get(environments))
 }
 
 /// An object rather than a bare array, so a later addition — a cursor, a
@@ -26,6 +27,11 @@ pub fn router() -> Router<AppState> {
 #[derive(Debug, Serialize)]
 pub struct ProjectList {
     pub projects: Vec<Project>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct EnvironmentList {
+    pub environments: Vec<Environment>,
 }
 
 /// Renewing the access token is [`Credentials`](crate::services::session::Credentials)'
@@ -71,4 +77,20 @@ async fn create_service(
         .await?;
 
     Ok((StatusCode::CREATED, Json(service)))
+}
+
+/// Separate from the projects list because environments are read on demand —
+/// when a project is expanded — not for every project on every page load.
+async fn environments(
+    State(state): State<AppState>,
+    Path(project_id): Path<String>,
+    CurrentSession { token, session }: CurrentSession,
+) -> ApiResult<Json<EnvironmentList>> {
+    let access_token = state.credentials().access_token(&token, session).await?;
+    let environments = state
+        .railway()
+        .environments(&access_token, &project_id)
+        .await?;
+
+    Ok(Json(EnvironmentList { environments }))
 }

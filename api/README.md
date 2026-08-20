@@ -230,6 +230,15 @@ tests off the network.
 inside, because one GraphQL query returns exactly that and asking twice would be
 two round trips for a shape the server already assembles.
 
+`GET /api/v1/projects/{id}/environments` lists a project's durable
+environments, and
+`GET /api/v1/services/{id}/instance?environment={id}` returns how that service
+is configured and deployed in one of them — `404` when it has no instance
+there. These are separate requests rather than more nesting because they are
+read on demand, and an instance exists per service *and* environment: fetching
+every combination up front is the oversized query this surface has answered
+with a `503` before.
+
 **Token renewal.** A session lasts two weeks and the access token it was opened
 with lasts about an hour, so something has to renew the second without ending
 the first. `Credentials` in
