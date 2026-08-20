@@ -151,6 +151,29 @@ export async function spinDownService(serviceId: string, environmentId: string):
   }
 }
 
+/**
+ * Spins a service back up in one environment: the deployment a spin-down
+ * removed is redeployed. The caller refetches the instance afterwards for the
+ * new deployment's state.
+ */
+export async function spinUpService(serviceId: string, environmentId: string): Promise<void> {
+  const response = await fetch(
+    `${API_URL}/api/v1/services/${encodeURIComponent(serviceId)}/spin-up?environment=${encodeURIComponent(environmentId)}`,
+    {
+      method: 'POST',
+      credentials: 'include',
+    },
+  );
+
+  if (response.status === 401) {
+    throw new SessionExpired('the Railway login behind this session has expired');
+  }
+
+  if (!response.ok) {
+    throw new RequestRejected(await rejectionMessage(response, 'The service could not be spun up'));
+  }
+}
+
 /** The envelope's message when there is one, `fallback` and the status when not. */
 async function rejectionMessage(response: Response, fallback: string): Promise<string> {
   try {

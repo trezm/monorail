@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::{
     error::ApiResult,
     extract::{CurrentSession, Json, Path, Query},
-    services::railway::ServiceInstance,
+    services::railway::{Deployment, ServiceInstance},
     state::AppState,
 };
 
@@ -19,6 +19,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/services/{service_id}/instance", get(instance))
         .route("/services/{service_id}/spin-down", post(spin_down))
+        .route("/services/{service_id}/spin-up", post(spin_up))
 }
 
 /// The environment rides in the query string rather than the path because it
@@ -62,6 +63,24 @@ async fn spin_down(
         .await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Redeploys what a spin-down removed — the inverse of `spin_down`, but `201`
+/// where that is `204`: this creates a deployment, and the fresh one comes
+/// back as Railway records it.
+async fn spin_up(
+    State(state): State<AppState>,
+    Path(service_id): Path<String>,
+    Query(query): Query<InstanceQuery>,
+    CurrentSession { token, session }: CurrentSession,
+) -> ApiResult<(StatusCode, Json<Deployment>)> {
+    let access_token = state.credentials().access_token(&token, session).await?;
+    let deployment = state
+        .railway()
+        .spin_up(&access_token, &service_id, &query.environment)
+        .await?;
+
+    Ok((StatusCode::CREATED, Json(deployment)))
 }
 
 #[cfg(test)]
@@ -224,6 +243,89 @@ mod tests {
         assert_eq!(
             body["error"]["message"],
             "the service is already spun down in this environment"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_spin_up_endpoint_requires_a_session() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_empty("/services/service-1/spin-up?environment=env-1", None),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn a_spin_up_without_an_environment_is_rejected() {
+        let mut railway = MockRailwayApi::new();
+        railway.expect_spin_up().never();
+        let (app, cookie) = app_with_railway(railway);
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_empty("/services/service-1/spin-up", Some(&cookie)),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn spinning_up_a_service_missing_from_an_environment_is_not_found() {
+        let mut railway = MockRailwayApi::new();
+        railway
+            .expect_spin_up()
+            .returning(|_, service_id, environment_id| {
+                Err(RailwayError::NotFound(format!(
+                    "service `{service_id}` has no instance in `{environment_id}`"
+                )))
+            });
+        let (app, cookie) = app_with_railway(railway);
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_empty(
+                "/services/service-1/spin-up?environment=env-empty",
+                Some(&cookie),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+    }
+
+    /// Nothing spun down is the caller's situation, answered with Railway's
+    /// own message — not a `503` pretending the provider is down.
+    #[tokio::test]
+    async fn spinning_up_a_running_service_is_rejected() {
+        let mut railway = MockRailwayApi::new();
+        railway.expect_spin_up().returning(|_, _, _| {
+            Err(RailwayError::Rejected(
+                "the service is not spun down in this environment".to_owned(),
+            ))
+        });
+        let (app, cookie) = app_with_railway(railway);
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_empty(
+                "/services/service-running/spin-up?environment=env-1",
+                Some(&cookie),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body["error"]["message"],
+            "the service is not spun down in this environment"
         );
     }
 }

@@ -271,6 +271,10 @@ latest deployment there — a spin-down rather than a delete, because the servic
 and its configuration survive. `404` when there is no instance, `422` when
 nothing is running, `204` on success: removal leaves nothing to describe.
 
+`POST /api/v1/services/{id}/spin-up?environment={id}` is the inverse: it
+redeploys what a spin-down removed, answering `201` with the fresh deployment.
+`422` when the service is not spun down; the other answers match.
+
 **Token renewal.** A session lasts two weeks and the access token it was opened
 with lasts about an hour, so something has to renew the second without ending
 the first. `Credentials` in

@@ -196,6 +196,17 @@ pub trait RailwayApi: Send + Sync + 'static {
         service_id: &str,
         environment_id: &str,
     ) -> RailwayResult<()>;
+
+    /// Spins a service back up in one environment by redeploying what a
+    /// spin-down removed, returning the fresh deployment as Railway records
+    /// it. [`RailwayError::NotFound`] when the service has no instance there,
+    /// [`RailwayError::Rejected`] when it is not spun down.
+    async fn spin_up(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+    ) -> RailwayResult<Deployment>;
 }
 
 /// The query. `externalWorkspaces` is the surface Railway documents for OAuth
@@ -258,10 +269,22 @@ mutation ServiceCreate($input: ServiceCreateInput!) {
 ";
 
 /// Spinning down is Railway's own "Remove" on a deployment: the instance and
-/// its configuration stay, and `serviceInstanceRedeploy` brings it back later.
+/// its configuration stay, and spinning back up brings it back.
 const DEPLOYMENT_REMOVE_MUTATION: &str = r"
 mutation DeploymentRemove($id: String!) {
   deploymentRemove(id: $id)
+}
+";
+
+/// Spinning back up is Railway's own "Redeploy" on the removed deployment:
+/// the same build comes back, rather than a fresh one from source.
+const DEPLOYMENT_REDEPLOY_MUTATION: &str = r"
+mutation DeploymentRedeploy($id: String!) {
+  deploymentRedeploy(id: $id) {
+    id
+    status
+    createdAt
+  }
 }
 ";
 
@@ -495,6 +518,54 @@ impl RailwayApi for RailwayGraphQl {
             )))
         }
     }
+
+    /// Reads the instance first for the same reason `spin_down` does: the
+    /// mutation wants a deployment id, callers think in services and
+    /// environments.
+    async fn spin_up(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+    ) -> RailwayResult<Deployment> {
+        let instance = self
+            .service_instance(access_token, service_id, environment_id)
+            .await?;
+
+        // Only a removed deployment can come back; anything else is either
+        // still up or never existed, and both are the caller's news.
+        let deployment = match instance.latest_deployment {
+            Some(deployment) if deployment.status == "REMOVED" => deployment,
+            Some(_) => {
+                return Err(RailwayError::Rejected(
+                    "the service is not spun down in this environment".to_owned(),
+                ));
+            }
+            None => {
+                return Err(RailwayError::Rejected(
+                    "the service has never been deployed in this environment".to_owned(),
+                ));
+            }
+        };
+
+        let body = serde_json::json!({
+            "query": DEPLOYMENT_REDEPLOY_MUTATION,
+            "variables": { "id": deployment.id },
+        });
+
+        let envelope: GraphQlResponse<DeploymentRedeployMutation> =
+            self.post(access_token, &body, "redeploy").await?;
+
+        let node = envelope
+            .into_data(RailwayError::Rejected)?
+            .deployment_redeploy;
+
+        Ok(Deployment {
+            id: node.id,
+            status: node.status,
+            created_at: node.created_at,
+        })
+    }
 }
 
 /// A GraphQL response. `data` and `errors` can both be present — a partial
@@ -656,6 +727,12 @@ struct ServiceCreateMutation {
 #[serde(rename_all = "camelCase")]
 struct DeploymentRemoveMutation {
     deployment_remove: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeploymentRedeployMutation {
+    deployment_redeploy: DeploymentNode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -937,6 +1014,20 @@ mod tests {
         assert!(
             matches!(error, RailwayError::Rejected(message) if message == "Deployment not found")
         );
+    }
+
+    #[test]
+    fn a_redeploy_carries_the_fresh_deployment() {
+        let node = serde_json::from_str::<GraphQlResponse<DeploymentRedeployMutation>>(
+            r#"{"data":{"deploymentRedeploy":{"id":"d2","status":"BUILDING","createdAt":null}}}"#,
+        )
+        .expect("body should parse")
+        .into_data(RailwayError::Rejected)
+        .expect("should succeed")
+        .deployment_redeploy;
+
+        assert_eq!(node.id, "d2");
+        assert_eq!(node.status, "BUILDING");
     }
 
     /// A service with no instance in the asked-about environment is a `404`'s

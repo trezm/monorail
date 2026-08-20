@@ -99,6 +99,12 @@ mockall::mock! {
             service_id: &str,
             environment_id: &str,
         ) -> RailwayResult<()>;
+        async fn spin_up(
+            &self,
+            access_token: &Secret,
+            service_id: &str,
+            environment_id: &str,
+        ) -> RailwayResult<Deployment>;
     }
 }
 
@@ -659,4 +665,38 @@ async fn a_logged_in_browser_spins_a_service_down() {
 
     assert_eq!(status, StatusCode::NO_CONTENT);
     assert_eq!(body, Value::Null);
+}
+
+#[tokio::test]
+async fn a_logged_in_browser_spins_a_service_back_up() {
+    let mut railway = MockRailway::new();
+    railway
+        .expect_spin_up()
+        .withf(|_, service_id, environment_id| {
+            service_id == "service-1" && environment_id == "env-1"
+        })
+        .times(1)
+        .returning(|_, _, _| {
+            Ok(Deployment {
+                id: "deploy-2".to_owned(),
+                status: "BUILDING".to_owned(),
+                created_at: None,
+            })
+        });
+
+    let (app, _) = app(railway);
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_empty(
+            "/api/v1/services/service-1/spin-up?environment=env-1",
+            &session_cookie,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], "deploy-2");
+    assert_eq!(body["status"], "BUILDING");
 }
