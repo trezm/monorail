@@ -189,6 +189,99 @@ p {
   color: var(--muted);
 }
 
+.new-service {
+  display: flex;
+  flex-direction: column;
+  gap: 0.5rem;
+  margin: 0.35rem 0.5rem 0.5rem;
+  padding: 0.6rem 0.75rem;
+  border-radius: 0.5rem;
+  background: var(--background);
+}
+
+.new-service__kinds {
+  display: flex;
+  gap: 1rem;
+  margin: 0;
+  padding: 0;
+  border: none;
+  font-size: 0.85rem;
+  color: var(--muted);
+}
+
+.new-service__kind {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  cursor: pointer;
+}
+
+.new-service__row {
+  display: flex;
+  gap: 0.5rem;
+}
+
+.new-service__input {
+  flex: 1;
+  min-width: 0;
+  padding: 0.45rem 0.6rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.9rem;
+}
+
+.new-service__input:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.new-service__submit {
+  flex: none;
+  padding: 0.45rem 0.9rem;
+  border: none;
+  border-radius: 0.5rem;
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font: inherit;
+  font-size: 0.9rem;
+  font-weight: 600;
+  cursor: pointer;
+  transition: opacity 120ms ease-out;
+}
+
+.new-service__submit:hover {
+  opacity: 0.85;
+}
+
+.new-service__submit:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+.new-service__submit:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.new-service__error {
+  padding: 0;
+  font-size: 0.85rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 .login-button {
   display: inline-flex;
   align-items: center;

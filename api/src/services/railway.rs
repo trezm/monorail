@@ -32,6 +32,12 @@ pub enum RailwayError {
     #[error("this Railway login is no longer valid; sign in again")]
     TokenRejected,
 
+    /// Railway understood a mutation and declined it — a project that does not
+    /// exist, a source it cannot use. The message is Railway's own, and it is
+    /// the caller's to act on, not an outage.
+    #[error("{0}")]
+    Rejected(String),
+
     /// Railway was reached but did not answer usefully.
     #[error(transparent)]
     Provider(anyhow::Error),
@@ -44,6 +50,7 @@ impl From<RailwayError> for ApiError {
             // the credential behind it is spent, and starting a new login is
             // what fixes it.
             RailwayError::TokenRejected => Self::Unauthorized,
+            RailwayError::Rejected(message) => Self::UnprocessableEntity(message),
             RailwayError::Provider(source) => Self::Unavailable(source),
         }
     }
@@ -67,6 +74,35 @@ pub struct Service {
     pub created_at: Option<DateTime<Utc>>,
 }
 
+/// Where a new service's code comes from — the only two sources creation
+/// accepts today. Externally tagged, so on the wire it reads
+/// `{"docker_image": "nginx:latest"}` or `{"github_repo": "owner/repo"}`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ServiceSource {
+    DockerImage(String),
+    GithubRepo(String),
+}
+
+impl ServiceSource {
+    /// The image or repo as the caller gave it, without surrounding whitespace.
+    #[must_use]
+    pub fn value(&self) -> &str {
+        match self {
+            Self::DockerImage(value) | Self::GithubRepo(value) => value.trim(),
+        }
+    }
+
+    /// The wire name of the variant, for messages about it.
+    #[must_use]
+    pub fn field(&self) -> &'static str {
+        match self {
+            Self::DockerImage(_) => "docker_image",
+            Self::GithubRepo(_) => "github_repo",
+        }
+    }
+}
+
 /// Reads Railway on behalf of a logged-in user.
 ///
 /// A trait for the same reason [`AuthProvider`](super::auth::AuthProvider) is
@@ -76,6 +112,16 @@ pub struct Service {
 pub trait RailwayApi: Send + Sync + 'static {
     /// Every project the login granted access to, each carrying its services.
     async fn projects(&self, access_token: &Secret) -> RailwayResult<Vec<Project>>;
+
+    /// Creates a service in `project_id` from `source`, returning it as Railway
+    /// records it. Everything not in the source — the name included — is left
+    /// to Railway's defaults.
+    async fn create_service(
+        &self,
+        access_token: &Secret,
+        project_id: &str,
+        source: &ServiceSource,
+    ) -> RailwayResult<Service>;
 }
 
 /// The query. `externalWorkspaces` is the surface Railway documents for OAuth
@@ -97,6 +143,27 @@ query Projects {
   }
 }
 ";
+
+/// The mutation. `source` takes exactly one of `image` or `repo` — the same
+/// fork [`ServiceSource`] exposes; every other input is left unset.
+const SERVICE_CREATE_MUTATION: &str = r"
+mutation ServiceCreate($input: ServiceCreateInput!) {
+  serviceCreate(input: $input) {
+    id
+    name
+    createdAt
+  }
+}
+";
+
+fn service_create_variables(project_id: &str, source: &ServiceSource) -> serde_json::Value {
+    let source = match source {
+        ServiceSource::DockerImage(_) => serde_json::json!({ "image": source.value() }),
+        ServiceSource::GithubRepo(_) => serde_json::json!({ "repo": source.value() }),
+    };
+
+    serde_json::json!({ "input": { "projectId": project_id, "source": source } })
+}
 
 /// [`RailwayApi`] against Railway's public GraphQL API.
 pub struct RailwayGraphQl {
@@ -129,24 +196,35 @@ impl RailwayGraphQl {
     }
 }
 
-#[async_trait::async_trait]
-impl RailwayApi for RailwayGraphQl {
-    async fn projects(&self, access_token: &Secret) -> RailwayResult<Vec<Project>> {
+impl RailwayGraphQl {
+    /// Posts one GraphQL document and parses the envelope. Transport failures,
+    /// non-success statuses and unparseable bodies are all the provider's
+    /// fault; what a `200` envelope's `errors` mean is the caller's call.
+    /// `operation` names the request in error messages.
+    async fn post<T: serde::de::DeserializeOwned>(
+        &self,
+        access_token: &Secret,
+        body: &serde_json::Value,
+        operation: &str,
+    ) -> RailwayResult<GraphQlResponse<T>> {
         let response = self
             .http
             .post(self.endpoint.clone())
             .bearer_auth(access_token.expose())
-            .json(&serde_json::json!({ "query": PROJECTS_QUERY }))
+            .json(body)
             .send()
             .await
             .map_err(|error| {
-                RailwayError::Provider(anyhow::Error::new(error).context("projects query failed"))
+                RailwayError::Provider(
+                    anyhow::Error::new(error).context(format!("the {operation} request failed")),
+                )
             })?;
 
         let status = response.status();
         let body = response.bytes().await.map_err(|error| {
             RailwayError::Provider(
-                anyhow::Error::new(error).context("could not read the projects response"),
+                anyhow::Error::new(error)
+                    .context(format!("could not read the {operation} response")),
             )
         })?;
 
@@ -156,19 +234,59 @@ impl RailwayApi for RailwayGraphQl {
 
         if !status.is_success() {
             return Err(RailwayError::Provider(anyhow::anyhow!(
-                "Railway answered {status} to the projects query"
+                "Railway answered {status} to the {operation} request"
             )));
         }
 
-        let envelope: GraphQlResponse<ExternalWorkspacesQuery> = serde_json::from_slice(&body)
-            .map_err(|error| {
-                RailwayError::Provider(
-                    anyhow::Error::new(error)
-                        .context("the projects response was not the expected shape"),
-                )
-            })?;
+        serde_json::from_slice(&body).map_err(|error| {
+            RailwayError::Provider(anyhow::Error::new(error).context(format!(
+                "the {operation} response was not the expected shape"
+            )))
+        })
+    }
+}
 
-        Ok(envelope.into_data()?.into_projects())
+#[async_trait::async_trait]
+impl RailwayApi for RailwayGraphQl {
+    async fn projects(&self, access_token: &Secret) -> RailwayResult<Vec<Project>> {
+        let envelope: GraphQlResponse<ExternalWorkspacesQuery> = self
+            .post(
+                access_token,
+                &serde_json::json!({ "query": PROJECTS_QUERY }),
+                "projects",
+            )
+            .await?;
+
+        Ok(envelope
+            .into_data(|messages| {
+                RailwayError::Provider(anyhow::anyhow!(
+                    "Railway rejected the projects query: {messages}"
+                ))
+            })?
+            .into_projects())
+    }
+
+    async fn create_service(
+        &self,
+        access_token: &Secret,
+        project_id: &str,
+        source: &ServiceSource,
+    ) -> RailwayResult<Service> {
+        let body = serde_json::json!({
+            "query": SERVICE_CREATE_MUTATION,
+            "variables": service_create_variables(project_id, source),
+        });
+
+        let envelope: GraphQlResponse<ServiceCreateMutation> =
+            self.post(access_token, &body, "service creation").await?;
+
+        let node = envelope.into_data(RailwayError::Rejected)?.service_create;
+
+        Ok(Service {
+            id: node.id,
+            name: node.name,
+            created_at: node.created_at,
+        })
     }
 }
 
@@ -189,7 +307,9 @@ struct GraphQlError {
 }
 
 impl<T> GraphQlResponse<T> {
-    fn into_data(self) -> RailwayResult<T> {
+    /// `reject` decides what a non-authorization error becomes: a failed query
+    /// is the provider's problem, a declined mutation is the caller's.
+    fn into_data(self, reject: impl FnOnce(String) -> RailwayError) -> RailwayResult<T> {
         if !self.errors.is_empty() {
             let messages: Vec<_> = self
                 .errors
@@ -206,10 +326,7 @@ impl<T> GraphQlResponse<T> {
                 return Err(RailwayError::TokenRejected);
             }
 
-            return Err(RailwayError::Provider(anyhow::anyhow!(
-                "Railway rejected the projects query: {}",
-                messages.join("; ")
-            )));
+            return Err(reject(messages.join("; ")));
         }
 
         self.data
@@ -306,6 +423,12 @@ struct ServiceNode {
     created_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceCreateMutation {
+    service_create: ServiceNode,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -313,7 +436,11 @@ mod tests {
     fn parse(body: &str) -> RailwayResult<Vec<Project>> {
         serde_json::from_str::<GraphQlResponse<ExternalWorkspacesQuery>>(body)
             .expect("body should parse")
-            .into_data()
+            .into_data(|messages| {
+                RailwayError::Provider(anyhow::anyhow!(
+                    "Railway rejected the projects query: {messages}"
+                ))
+            })
             .map(ExternalWorkspacesQuery::into_projects)
     }
 
@@ -380,5 +507,36 @@ mod tests {
         let error = parse("{}").expect_err("should fail");
 
         assert!(matches!(error, RailwayError::Provider(_)));
+    }
+
+    #[test]
+    fn each_source_fills_its_own_input_field() {
+        let image = service_create_variables(
+            "p1",
+            &ServiceSource::DockerImage(" nginx:latest ".to_owned()),
+        );
+        assert_eq!(
+            image,
+            serde_json::json!({ "input": { "projectId": "p1", "source": { "image": "nginx:latest" } } })
+        );
+
+        let repo =
+            service_create_variables("p1", &ServiceSource::GithubRepo("owner/repo".to_owned()));
+        assert_eq!(
+            repo,
+            serde_json::json!({ "input": { "projectId": "p1", "source": { "repo": "owner/repo" } } })
+        );
+    }
+
+    #[test]
+    fn a_declined_mutation_carries_railways_message() {
+        let error = serde_json::from_str::<GraphQlResponse<ServiceCreateMutation>>(
+            r#"{"data":null,"errors":[{"message":"Project not found"}]}"#,
+        )
+        .expect("body should parse")
+        .into_data(RailwayError::Rejected)
+        .expect_err("should fail");
+
+        assert!(matches!(error, RailwayError::Rejected(message) if message == "Project not found"));
     }
 }

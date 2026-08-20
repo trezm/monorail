@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 
-import { projects, SessionExpired, type Project } from '../lib/projects';
+import NewServiceForm from './NewServiceForm';
+import { projects, SessionExpired, type Project, type Service } from '../lib/projects';
 import { useSession } from '../lib/session';
 
 /**
@@ -45,6 +46,24 @@ export default function ProjectList() {
       live = false;
     };
   }, [session]);
+
+  // Inserted in name order, where a fresh GET would have put it.
+  const addService = (projectId: string, service: Service) => {
+    setLoaded((current) => {
+      if (!current) return current;
+
+      return current.map((project) =>
+        project.id === projectId
+          ? {
+              ...project,
+              services: [...project.services, service].sort((a, b) =>
+                a.name.localeCompare(b.name),
+              ),
+            }
+          : project,
+      );
+    });
+  };
 
   const toggle = (id: string, open: boolean) => {
     setExpanded((current) => {
@@ -104,6 +123,11 @@ export default function ProjectList() {
                 ))}
               </ul>
             )}
+
+            <NewServiceForm
+              projectId={project.id}
+              onCreated={(service) => addService(project.id, service)}
+            />
           </details>
         </li>
       ))}
