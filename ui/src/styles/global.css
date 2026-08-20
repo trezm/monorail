@@ -369,7 +369,7 @@ p {
   color: var(--danger);
 }
 
-.spin-down {
+.service-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -377,12 +377,12 @@ p {
   margin-top: 0.5rem;
 }
 
-.spin-down__confirm {
+.service-actions__confirm {
   font-size: 0.8rem;
   color: var(--muted);
 }
 
-.spin-down__action {
+.service-actions__button {
   padding: 0.3rem 0.7rem;
   border: 1px solid var(--border);
   border-radius: 0.5rem;
@@ -394,28 +394,28 @@ p {
   transition: opacity 120ms ease-out;
 }
 
-.spin-down__action:hover {
+.service-actions__button:hover {
   opacity: 0.85;
 }
 
-.spin-down__action:focus-visible {
+.service-actions__button:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 1px;
 }
 
-.spin-down__action:disabled {
+.service-actions__button:disabled {
   cursor: default;
   opacity: 0.6;
 }
 
-.spin-down__action--danger {
+.service-actions__button--danger {
   border-color: var(--danger);
   color: var(--danger);
   font-weight: 600;
 }
 
 /* The error is part of the row's flow, not the grid of instance fields. */
-.spin-down .service__note {
+.service-actions .service__note {
   flex-basis: 100%;
   margin: 0;
 }

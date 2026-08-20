@@ -12,7 +12,7 @@ account bar and the Railway projects on that account, each expanding to the
 services inside it. An expanded project offers a dropdown of its environments
 and shows how each service is configured and deployed in the selected one. A
 service with a running deployment can be spun down from there, behind a
-confirmation step.
+confirmation step, and a spun-down one brought back up.
 
 ## Layout
 

@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::{
     error::ApiResult,
     extract::{CurrentSession, Json, Path, Query},
-    services::railway::ServiceInstance,
+    services::railway::{Deployment, ServiceInstance},
     state::AppState,
 };
 
@@ -19,6 +19,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/services/{service_id}/instance", get(instance))
         .route("/services/{service_id}/spin-down", post(spin_down))
+        .route("/services/{service_id}/spin-up", post(spin_up))
 }
 
 /// The environment rides in the query string rather than the path because it
@@ -62,4 +63,22 @@ async fn spin_down(
         .await?;
 
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Redeploys what a spin-down removed — the inverse of `spin_down`, but `201`
+/// where that is `204`: this creates a deployment, and the fresh one comes
+/// back as Railway records it.
+async fn spin_up(
+    State(state): State<AppState>,
+    Path(service_id): Path<String>,
+    Query(query): Query<InstanceQuery>,
+    CurrentSession { token, session }: CurrentSession,
+) -> ApiResult<(StatusCode, Json<Deployment>)> {
+    let access_token = state.credentials().access_token(&token, session).await?;
+    let deployment = state
+        .railway()
+        .spin_up(&access_token, &service_id, &query.environment)
+        .await?;
+
+    Ok((StatusCode::CREATED, Json(deployment)))
 }
