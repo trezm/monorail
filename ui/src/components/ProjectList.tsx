@@ -1,50 +1,52 @@
 import { useEffect, useState } from 'react';
 
-import { ApiError, getProjects, type Project } from '../lib/api';
+import { projects, SessionExpired, type Project } from '../lib/projects';
+import { useSession } from '../lib/session';
 
 /**
  * The projects on the account, each an expandable row over its services.
  *
  * A native `<details>` rather than a hand-rolled disclosure: it is keyboard
- * operable, announced as expandable, and findable by the browser's own
- * in-page search before any of this code runs. `open` is still controlled, so
- * an account with a single project can start expanded without React and the
- * DOM disagreeing about the attribute afterwards.
+ * operable, announced as expandable, and findable by the browser's own in-page
+ * search before any of this code runs. `open` is still controlled, so an
+ * account with a single project can start expanded without React and the DOM
+ * disagreeing about the attribute afterwards.
  */
-export default function ProjectList({ onUnauthorized }: { onUnauthorized: () => void }) {
-  const [projects, setProjects] = useState<Project[] | null>(null);
-  const [error, setError] = useState<string | null>(null);
+export default function ProjectList() {
+  const session = useSession();
+  const [loaded, setLoaded] = useState<Project[] | null>(null);
+  const [failed, setFailed] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
 
   useEffect(() => {
     let live = true;
 
-    getProjects()
-      .then((loaded) => {
+    projects()
+      .then((found) => {
         if (!live) return;
 
-        setProjects(loaded);
-        setExpanded(new Set(loaded.length === 1 ? [loaded[0].id] : []));
+        setLoaded(found);
+        setExpanded(new Set(found.length === 1 ? [found[0].id] : []));
       })
       .catch((cause: unknown) => {
         if (!live) return;
 
-        // The session cookie is fine; the Railway token behind it is spent, and
-        // only a new login replaces it.
-        if (cause instanceof ApiError && cause.isUnauthorized) {
-          onUnauthorized();
+        // Nothing local can renew a spent Railway token, so the session is over
+        // and the provider should say so — that puts the login button back.
+        if (cause instanceof SessionExpired) {
+          session.logOut().catch(() => setFailed(true));
           return;
         }
 
-        setError(cause instanceof ApiError ? cause.message : 'the projects could not be loaded');
+        setFailed(true);
       });
 
     return () => {
       live = false;
     };
-  }, [onUnauthorized]);
+  }, [session]);
 
-  function toggle(id: string, open: boolean) {
+  const toggle = (id: string, open: boolean) => {
     setExpanded((current) => {
       const next = new Set(current);
       if (open) next.add(id);
@@ -52,23 +54,15 @@ export default function ProjectList({ onUnauthorized }: { onUnauthorized: () => 
 
       return next;
     });
-  }
+  };
 
-  if (error) {
-    return <p className="notice notice--error">{error}</p>;
-  }
-
-  if (!projects) {
-    return <p className="notice">Loading your projects…</p>;
-  }
-
-  if (projects.length === 0) {
-    return <p className="notice">This Railway account has no projects yet.</p>;
-  }
+  if (failed) return <p className="notice notice--error">Your projects could not be loaded.</p>;
+  if (loaded === null) return <p className="notice">Loading your projects…</p>;
+  if (loaded.length === 0) return <p className="notice">This Railway account has no projects yet.</p>;
 
   return (
     <ul className="projects">
-      {projects.map((project) => (
+      {loaded.map((project) => (
         <li key={project.id}>
           <details
             className="project"
@@ -88,8 +82,7 @@ export default function ProjectList({ onUnauthorized }: { onUnauthorized: () => 
               </svg>
               <span className="project__name">{project.name}</span>
               <span className="project__count">
-                {project.services.length}{' '}
-                {project.services.length === 1 ? 'service' : 'services'}
+                {project.services.length} {project.services.length === 1 ? 'service' : 'services'}
               </span>
             </summary>
 

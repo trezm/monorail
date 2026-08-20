@@ -35,10 +35,12 @@ body {
   font-family: ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
 }
 
+/* The top padding clears the fixed account bar, which overlaps the column once
+   the viewport is narrow enough for the two to share a line. */
 main {
   width: min(48rem, 100%);
   margin: 0 auto;
-  padding: 2rem 1.25rem 4rem;
+  padding: 4rem 1.25rem;
 }
 
 h1 {
@@ -62,20 +64,6 @@ p {
   min-height: 70vh;
   justify-content: center;
   text-align: center;
-}
-
-.masthead {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-  padding-bottom: 1.5rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.masthead__user {
-  margin-top: 0.35rem;
-  font-size: 0.9rem;
 }
 
 .section-heading {
@@ -233,28 +221,53 @@ p {
   height: 1.15rem;
 }
 
-.text-button {
-  flex: none;
-  padding: 0.4rem 0.7rem;
-  border: 1px solid var(--border);
+.user-menu {
+  position: fixed;
+  top: 0;
+  right: 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.9rem 1.25rem;
+  font-size: 0.9rem;
+}
+
+.user-menu__avatar {
+  width: 1.75rem;
+  height: 1.75rem;
+  border-radius: 50%;
+  object-fit: cover;
+}
+
+.user-menu__name {
+  font-weight: 600;
+}
+
+.user-menu__logout {
+  padding: 0.4rem 0.85rem;
+  border: 1px solid color-mix(in srgb, var(--foreground) 25%, transparent);
   border-radius: 0.5rem;
   background: none;
   color: var(--muted);
   font: inherit;
-  font-size: 0.85rem;
+  font-weight: 600;
   cursor: pointer;
+  transition:
+    color 120ms ease-out,
+    border-color 120ms ease-out;
 }
 
-.text-button:hover:not(:disabled) {
+.user-menu__logout:hover {
+  border-color: color-mix(in srgb, var(--foreground) 45%, transparent);
   color: var(--foreground);
 }
 
-.text-button:disabled {
-  opacity: 0.6;
-  cursor: default;
-}
-
-.text-button:focus-visible {
+.user-menu__logout:focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
+}
+
+.user-menu__logout:disabled {
+  cursor: default;
+  opacity: 0.6;
 }

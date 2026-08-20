@@ -7,25 +7,29 @@ bazel run //ui:dev     # http://localhost:4321
 bazel build //ui       # static site into bazel-bin/ui/dist
 ```
 
-One page: a Login with Railway button, or — once there is a session — the
-account's Railway projects, each expanding to the services inside it.
+One page: a Login with Railway button, or — once there is a session — an
+account bar and the Railway projects on that account, each expanding to the
+services inside it.
 
 ## Layout
 
 | Path | |
 |---|---|
-| `src/pages/index.astro` | The only route. Shell and nothing else. |
-| `src/components/Dashboard.tsx` | Whether there is a login, and what to show either way. |
-| `src/components/ProjectList.tsx` | The projects, and their services. |
+| `src/pages/index.astro` | The only route. |
+| `src/components/App.tsx` | The one island, hydrated with `client:load`. |
 | `src/components/LoginButton.tsx` | The button. |
-| `src/lib/api.ts` | Every call to the API, and the shape of a failure. |
+| `src/components/UserMenu.tsx` | Name, avatar and log out, top right. |
+| `src/components/ProjectList.tsx` | The projects, and their services. |
+| `src/lib/session.tsx` | The session context, provider and hook. |
+| `src/lib/projects.ts` | `GET /api/v1/projects`, and the types it returns. |
 | `src/styles/global.css` | Everything visual. No framework. |
 | `astro.config.mjs` | React integration, and the output paths Bazel overrides. |
 
-The site is static, so who is signed in cannot be known at build time. One
-island asks `GET /api/v1/users/me` on mount and renders the login or the
-dashboard from the answer; a `checking` state in between is what stops a
-signed-in visitor seeing a login button that is about to disappear.
+The button is an anchor, not a `<button>` with an `onClick`. An OAuth redirect
+has to be a top-level navigation, so `fetch` cannot start one, and a real link
+keeps middle-click, keyboard activation and the status bar working. It is a
+React component anyway because the redirect takes a moment and the click needs
+acknowledging.
 
 A project is a native `<details>`, not a hand-rolled disclosure: it is keyboard
 operable, announced as expandable, and findable by the browser's own in-page
@@ -33,18 +37,30 @@ search before any of this code runs. `open` is controlled from React so an
 account with a single project can start expanded without the component and the
 DOM disagreeing about the attribute afterwards.
 
-The login button is an anchor, not a `<button>` with an `onClick`. An OAuth
-redirect has to be a top-level navigation, so `fetch` cannot start one, and a
-real link keeps middle-click, keyboard activation and the status bar working. It
-is a React component anyway because the redirect takes a moment and the click
-needs acknowledging.
+## The session
 
-`src/lib/api.ts` sends `credentials: 'include'` on every call — the session
-cookie belongs to the API's origin, not this one — and turns a failure into an
-`ApiError` carrying the API's own `code`. Branch on that, never on the message.
-An `unauthorized` from `/api/v1/projects` means the Railway token behind the
-session is spent, so the page falls back to the login rather than reporting an
-error.
+The site is static, so the build knows nothing about who is looking at it and
+the browser has to ask. `SessionProvider` requests `GET /api/v1/users/me` once
+with `credentials: 'include'`, which is what attaches the session cookie across
+the two origins. A `401` is the ordinary answer for a visitor who has not logged
+in, not an error.
+
+That answer decides what renders. `session.isSignedIn()` and
+`session.isSignedOut()` are not each other's negation — until the request
+answers, both are false — so the account bar, the login button and the projects
+each wait for their own answer instead of one of them showing to the wrong
+person.
+
+React context does not cross Astro island boundaries, so everything that reads
+the session lives under a single `client:load` island rather than one per
+component. That is what `App.tsx` is for, and it is why logging out needs no
+page reload: `DELETE /auth/session` clears the `HttpOnly` cookie server-side —
+nothing else can — and the provider then tells every component at once.
+
+A `401` from `GET /api/v1/projects` means something else: the cookie is still
+good and the Railway token behind it is spent. Nothing in the browser can renew
+it, so `ProjectList` ends the session through the provider, which puts the login
+button back.
 
 ## Configuration
 

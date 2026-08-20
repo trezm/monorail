@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-import { LOGIN_URL } from '../lib/api';
+import { API_URL, useSession } from '../lib/session';
 
 /**
  * Starts the Railway login.
@@ -10,14 +10,20 @@ import { LOGIN_URL } from '../lib/api';
  * keeps middle-click, keyboard activation and the status bar working. The
  * component is interactive only to acknowledge the click, since the redirect
  * itself takes a moment.
+ *
+ * Nothing renders until the session is known, so an already signed-in visitor
+ * — which is where the callback lands them — is never offered a second login.
  */
 export default function LoginButton() {
+  const session = useSession();
   const [redirecting, setRedirecting] = useState(false);
+
+  if (!session.isSignedOut()) return null;
 
   return (
     <a
       className="login-button"
-      href={LOGIN_URL}
+      href={`${API_URL}/auth/railway`}
       aria-busy={redirecting}
       onClick={() => setRedirecting(true)}
     >
