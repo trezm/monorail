@@ -448,6 +448,24 @@ mod tests {
             ));
             Ok(())
         }
+
+        async fn spin_down(
+            &self,
+            _access_token: &Secret,
+            _service_id: &str,
+            _environment_id: &str,
+        ) -> RailwayResult<()> {
+            unreachable!("the loop never spins services down")
+        }
+
+        async fn spin_up(
+            &self,
+            _access_token: &Secret,
+            _service_id: &str,
+            _environment_id: &str,
+        ) -> RailwayResult<crate::services::railway::Deployment> {
+            unreachable!("the loop never spins services up")
+        }
     }
 
     /// Honours only `refresh-ok`, like the stub in `tests/api.rs`.

@@ -118,14 +118,64 @@ export async function createService(
   }
 
   if (!response.ok) {
-    throw new RequestRejected(await rejectionMessage(response));
+    throw new RequestRejected(
+      await rejectionMessage(response, 'The service could not be created'),
+    );
   }
 
   return (await response.json()) as Service;
 }
 
-/** The envelope's message when there is one, a generic line when there is not. */
-async function rejectionMessage(response: Response): Promise<string> {
+/**
+ * Spins a service down in one environment: the latest deployment is removed,
+ * the service and its configuration stay. The caller refetches the instance
+ * afterwards for the deployment's new state.
+ */
+export async function spinDownService(serviceId: string, environmentId: string): Promise<void> {
+  const response = await fetch(
+    `${API_URL}/api/v1/services/${encodeURIComponent(serviceId)}/spin-down?environment=${encodeURIComponent(environmentId)}`,
+    {
+      method: 'POST',
+      credentials: 'include',
+    },
+  );
+
+  if (response.status === 401) {
+    throw new SessionExpired('the Railway login behind this session has expired');
+  }
+
+  if (!response.ok) {
+    throw new RequestRejected(
+      await rejectionMessage(response, 'The service could not be spun down'),
+    );
+  }
+}
+
+/**
+ * Spins a service back up in one environment: the deployment a spin-down
+ * removed is redeployed. The caller refetches the instance afterwards for the
+ * new deployment's state.
+ */
+export async function spinUpService(serviceId: string, environmentId: string): Promise<void> {
+  const response = await fetch(
+    `${API_URL}/api/v1/services/${encodeURIComponent(serviceId)}/spin-up?environment=${encodeURIComponent(environmentId)}`,
+    {
+      method: 'POST',
+      credentials: 'include',
+    },
+  );
+
+  if (response.status === 401) {
+    throw new SessionExpired('the Railway login behind this session has expired');
+  }
+
+  if (!response.ok) {
+    throw new RequestRejected(await rejectionMessage(response, 'The service could not be spun up'));
+  }
+}
+
+/** The envelope's message when there is one, `fallback` and the status when not. */
+async function rejectionMessage(response: Response, fallback: string): Promise<string> {
   try {
     const body = (await response.json()) as { error?: { message?: string } };
     if (body.error?.message) return body.error.message;
@@ -133,7 +183,7 @@ async function rejectionMessage(response: Response): Promise<string> {
     // A non-JSON body falls through to the generic message.
   }
 
-  return `The service could not be created (${response.status}).`;
+  return `${fallback} (${response.status}).`;
 }
 
 /** One project's durable environments; the per-pull-request ones are excluded. */

@@ -369,6 +369,57 @@ p {
   color: var(--danger);
 }
 
+.service-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+.service-actions__confirm {
+  font-size: 0.8rem;
+  color: var(--muted);
+}
+
+.service-actions__button {
+  padding: 0.3rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 0.5rem;
+  background: var(--surface);
+  color: var(--foreground);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+  transition: opacity 120ms ease-out;
+}
+
+.service-actions__button:hover {
+  opacity: 0.85;
+}
+
+.service-actions__button:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+}
+
+.service-actions__button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.service-actions__button--danger {
+  border-color: var(--danger);
+  color: var(--danger);
+  font-weight: 600;
+}
+
+/* The error is part of the row's flow, not the grid of instance fields. */
+.service-actions .service__note {
+  flex-basis: 100%;
+  margin: 0;
+}
+
 .autoscaling {
   margin-top: 0.6rem;
   padding-top: 0.6rem;

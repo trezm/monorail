@@ -3,8 +3,11 @@ import { useEffect, useState } from 'react';
 import AutoscalingRules from './AutoscalingRules';
 import {
   environments as fetchEnvironments,
+  RequestRejected,
   serviceInstance,
   SessionExpired,
+  spinDownService,
+  spinUpService,
   type Environment,
   type Project,
   type ServiceInstance,
@@ -27,6 +30,7 @@ export default function ProjectServices({ project, active }: { project: Project;
   const [failed, setFailed] = useState(false);
   const [selected, setSelected] = useState<string | null>(null);
   const [instances, setInstances] = useState<Record<string, InstanceState>>({});
+  const [epoch, setEpoch] = useState(0);
 
   useEffect(() => {
     if (active) setStarted(true);
@@ -102,7 +106,7 @@ export default function ProjectServices({ project, active }: { project: Project;
     return () => {
       live = false;
     };
-  }, [selected, project.services, session]);
+  }, [selected, epoch, project.services, session]);
 
   if (failed) {
     return <p className="project__empty notice--error">The environments could not be loaded.</p>;
@@ -129,24 +133,44 @@ export default function ProjectServices({ project, active }: { project: Project;
       )}
 
       <ul className="services">
-        {project.services.map((service) => (
-          <li key={service.id} className="service">
-            <div className="service__header">
-              <span className="service__name">{service.name}</span>
-              {service.created_at && (
-                <time className="service__created" dateTime={service.created_at}>
-                  {formatDate(service.created_at)}
-                </time>
+        {project.services.map((service) => {
+          const details = instances[service.id] ?? { status: 'loading' };
+
+          return (
+            <li key={service.id} className="service">
+              <div className="service__header">
+                <span className="service__name">{service.name}</span>
+                {service.created_at && (
+                  <time className="service__created" dateTime={service.created_at}>
+                    {formatDate(service.created_at)}
+                  </time>
+                )}
+              </div>
+              {selected !== null && (
+                <>
+                  <InstanceDetails state={details} />
+                  {canSpinDown(details) && (
+                    <SpinDown
+                      key={`down-${selected}`}
+                      serviceId={service.id}
+                      environmentId={selected}
+                      onSpunDown={() => setEpoch((count) => count + 1)}
+                    />
+                  )}
+                  {canSpinUp(details) && (
+                    <SpinUp
+                      key={`up-${selected}`}
+                      serviceId={service.id}
+                      environmentId={selected}
+                      onSpunUp={() => setEpoch((count) => count + 1)}
+                    />
+                  )}
+                  <AutoscalingRules serviceId={service.id} environmentId={selected} />
+                </>
               )}
-            </div>
-            {selected !== null && (
-              <>
-                <InstanceDetails state={instances[service.id] ?? { status: 'loading' }} />
-                <AutoscalingRules serviceId={service.id} environmentId={selected} />
-              </>
-            )}
-          </li>
-        ))}
+            </li>
+          );
+        })}
       </ul>
     </>
   );
@@ -156,6 +180,153 @@ type InstanceState =
   | { status: 'loading' }
   | { status: 'failed' }
   | { status: 'loaded'; instance: ServiceInstance | null };
+
+/** Only something actually running can be spun down. */
+function canSpinDown(state: InstanceState): boolean {
+  if (state.status !== 'loaded' || state.instance === null) return false;
+
+  const deployment = state.instance.latest_deployment;
+
+  return deployment !== null && deployment.status !== 'REMOVED' && deployment.status !== 'REMOVING';
+}
+
+/** Only a removed deployment can come back. Disjoint from `canSpinDown`. */
+function canSpinUp(state: InstanceState): boolean {
+  return (
+    state.status === 'loaded' &&
+    state.instance !== null &&
+    state.instance.latest_deployment?.status === 'REMOVED'
+  );
+}
+
+/**
+ * Redeploys what a spin-down removed. No arming step: bringing a service back
+ * is not the direction a stray click needs guarding against. Keyed by
+ * environment in the parent, and success reports up for the same reasons as
+ * `SpinDown`.
+ */
+function SpinUp({
+  serviceId,
+  environmentId,
+  onSpunUp,
+}: {
+  serviceId: string;
+  environmentId: string;
+  onSpunUp: () => void;
+}) {
+  const session = useSession();
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fire = () => {
+    setBusy(true);
+    setError(null);
+
+    spinUpService(serviceId, environmentId)
+      .then(() => onSpunUp())
+      .catch((cause: unknown) => {
+        if (cause instanceof SessionExpired) {
+          session.logOut().catch(() => setError('Your session has expired. Reload to sign in.'));
+          return;
+        }
+
+        setBusy(false);
+        setError(
+          cause instanceof RequestRejected ? cause.message : 'The service could not be spun up.',
+        );
+      });
+  };
+
+  return (
+    <div className="service-actions">
+      <button type="button" className="service-actions__button" onClick={fire} disabled={busy}>
+        {busy ? 'Spinning up…' : 'Spin up'}
+      </button>
+      {error && (
+        <p className="service__note service__note--error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Removes a service's running deployment in one environment, behind an arming
+ * step so one stray click cannot take production down. Keyed by environment in
+ * the parent, so switching the dropdown disarms it. Success reports up rather
+ * than rendering here: the parent refetches the instances, and the refreshed
+ * deployment state is what replaces this button.
+ */
+function SpinDown({
+  serviceId,
+  environmentId,
+  onSpunDown,
+}: {
+  serviceId: string;
+  environmentId: string;
+  onSpunDown: () => void;
+}) {
+  const session = useSession();
+  const [armed, setArmed] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const fire = () => {
+    setBusy(true);
+    setError(null);
+
+    spinDownService(serviceId, environmentId)
+      .then(() => onSpunDown())
+      .catch((cause: unknown) => {
+        if (cause instanceof SessionExpired) {
+          session.logOut().catch(() => setError('Your session has expired. Reload to sign in.'));
+          return;
+        }
+
+        setBusy(false);
+        setArmed(false);
+        setError(
+          cause instanceof RequestRejected ? cause.message : 'The service could not be spun down.',
+        );
+      });
+  };
+
+  return (
+    <div className="service-actions">
+      {armed ? (
+        <>
+          <span className="service-actions__confirm">Remove the running deployment?</span>
+          <button
+            type="button"
+            className="service-actions__button service-actions__button--danger"
+            onClick={fire}
+            disabled={busy}
+          >
+            {busy ? 'Spinning down…' : 'Spin down'}
+          </button>
+          <button
+            type="button"
+            className="service-actions__button"
+            onClick={() => setArmed(false)}
+            disabled={busy}
+          >
+            Cancel
+          </button>
+        </>
+      ) : (
+        <button type="button" className="service-actions__button" onClick={() => setArmed(true)}>
+          Spin down
+        </button>
+      )}
+      {error && (
+        <p className="service__note service__note--error" role="alert">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
 
 function InstanceDetails({ state }: { state: InstanceState }) {
   if (state.status === 'loading') return <p className="service__note">Loading details…</p>;
