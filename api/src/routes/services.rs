@@ -11,7 +11,7 @@ use serde::Deserialize;
 use crate::{
     error::ApiResult,
     extract::{CurrentSession, Json, Path, Query},
-    services::railway::ServiceInstance,
+    services::railway::{Deployment, ServiceInstance},
     state::AppState,
 };
 
@@ -65,20 +65,20 @@ async fn spin_down(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Redeploys what a spin-down removed — the inverse of `spin_down`, and `204`
-/// for the same reason: the UI refetches the instance rather than trusting a
-/// snapshot of a deployment that is only starting.
+/// Redeploys what a spin-down removed — the inverse of `spin_down`, but `201`
+/// where that is `204`: this creates a deployment, and the fresh one comes
+/// back as Railway records it.
 async fn spin_up(
     State(state): State<AppState>,
     Path(service_id): Path<String>,
     Query(query): Query<InstanceQuery>,
     CurrentSession { token, session }: CurrentSession,
-) -> ApiResult<StatusCode> {
+) -> ApiResult<(StatusCode, Json<Deployment>)> {
     let access_token = state.credentials().access_token(&token, session).await?;
-    state
+    let deployment = state
         .railway()
         .spin_up(&access_token, &service_id, &query.environment)
         .await?;
 
-    Ok(StatusCode::NO_CONTENT)
+    Ok((StatusCode::CREATED, Json(deployment)))
 }

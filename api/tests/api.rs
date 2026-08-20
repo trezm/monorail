@@ -1210,8 +1210,9 @@ async fn a_logged_in_browser_spins_a_service_back_up() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::NO_CONTENT);
-    assert_eq!(body, Value::Null);
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], "deploy-2");
+    assert_eq!(body["status"], "BUILDING");
     assert_eq!(
         railway.last_spun_up(),
         Some(("service-1".to_owned(), "env-1".to_owned()))
