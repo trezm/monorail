@@ -131,6 +131,16 @@ fn post_json(uri: &str, cookie: Option<&str>, body: &Value) -> Request<Body> {
         .expect("bad request")
 }
 
+fn post_empty(uri: &str, cookie: Option<&str>) -> Request<Body> {
+    let mut builder = Request::builder().method("POST").uri(uri);
+
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+
+    builder.body(Body::empty()).expect("bad request")
+}
+
 /// Every `Set-Cookie` on a response, as raw header values.
 fn set_cookies(response: &Response) -> Vec<String> {
     response
@@ -284,6 +294,7 @@ impl SessionStore for MemorySessions {
 struct StubRailway {
     seen: Mutex<Vec<String>>,
     created: Mutex<Vec<(String, ServiceSource)>>,
+    spun_down: Mutex<Vec<(String, String)>>,
 }
 
 impl StubRailway {
@@ -297,6 +308,10 @@ impl StubRailway {
 
     fn last_created(&self) -> Option<(String, ServiceSource)> {
         self.created.lock().expect("lock").last().cloned()
+    }
+
+    fn last_spun_down(&self) -> Option<(String, String)> {
+        self.spun_down.lock().expect("lock").last().cloned()
     }
 }
 
@@ -424,6 +439,39 @@ impl RailwayApi for StubRailway {
                 created_at: None,
             }),
         })
+    }
+
+    /// `env-empty` mirrors `service_instance`; `service-parked` is one whose
+    /// latest deployment is already gone.
+    async fn spin_down(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+    ) -> RailwayResult<()> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push(access_token.expose().to_owned());
+
+        if environment_id == "env-empty" {
+            return Err(RailwayError::NotFound(format!(
+                "service `{service_id}` has no instance in `{environment_id}`"
+            )));
+        }
+
+        if service_id == "service-parked" {
+            return Err(RailwayError::Rejected(
+                "the service is already spun down in this environment".to_owned(),
+            ));
+        }
+
+        self.spun_down
+            .lock()
+            .expect("lock")
+            .push((service_id.to_owned(), environment_id.to_owned()));
+
+        Ok(())
     }
 }
 
@@ -989,6 +1037,107 @@ async fn an_instance_request_without_an_environment_is_rejected() {
 
     assert_eq!(status, StatusCode::BAD_REQUEST);
     assert_eq!(body["error"]["code"], "bad_request");
+}
+
+#[tokio::test]
+async fn the_spin_down_endpoint_requires_a_session() {
+    let (app, _) = app_with_login();
+
+    let (status, body) = send(
+        &app,
+        post_empty(
+            "/api/v1/services/service-1/spin-down?environment=env-1",
+            None,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn a_logged_in_browser_spins_a_service_down() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_empty(
+            "/api/v1/services/service-1/spin-down?environment=env-1",
+            Some(&session_cookie),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    assert_eq!(body, Value::Null);
+    assert_eq!(
+        railway.last_spun_down(),
+        Some(("service-1".to_owned(), "env-1".to_owned()))
+    );
+}
+
+#[tokio::test]
+async fn spinning_down_a_service_missing_from_an_environment_is_not_found() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_empty(
+            "/api/v1/services/service-1/spin-down?environment=env-empty",
+            Some(&session_cookie),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+    assert_eq!(railway.last_spun_down(), None);
+}
+
+/// Nothing running is the caller's situation, answered with Railway's own
+/// message — not a `503` pretending the provider is down.
+#[tokio::test]
+async fn spinning_down_a_parked_service_is_rejected() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_empty(
+            "/api/v1/services/service-parked/spin-down?environment=env-1",
+            Some(&session_cookie),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        body["error"]["message"],
+        "the service is already spun down in this environment"
+    );
+    assert_eq!(railway.last_spun_down(), None);
+}
+
+#[tokio::test]
+async fn a_spin_down_without_an_environment_is_rejected() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_empty(
+            "/api/v1/services/service-1/spin-down",
+            Some(&session_cookie),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
+    assert_eq!(railway.last_spun_down(), None);
 }
 
 /// A session outlives the access token it was opened with, so a stale one is

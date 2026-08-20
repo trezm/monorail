@@ -10,7 +10,9 @@ bazel build //ui       # static site into bazel-bin/ui/dist
 One page: a Login with Railway button, or — once there is a session — an
 account bar and the Railway projects on that account, each expanding to the
 services inside it. An expanded project offers a dropdown of its environments
-and shows how each service is configured and deployed in the selected one.
+and shows how each service is configured and deployed in the selected one. A
+service with a running deployment can be spun down from there, behind a
+confirmation step.
 
 ## Layout
 

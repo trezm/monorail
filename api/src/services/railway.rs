@@ -183,6 +183,18 @@ pub trait RailwayApi: Send + Sync + 'static {
         service_id: &str,
         environment_id: &str,
     ) -> RailwayResult<ServiceInstance>;
+
+    /// Spins a service down in one environment by removing its latest
+    /// deployment. The service and its configuration survive; only the
+    /// running thing goes away. [`RailwayError::NotFound`] when the service
+    /// has no instance there, [`RailwayError::Rejected`] when nothing is
+    /// running to remove.
+    async fn spin_down(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+    ) -> RailwayResult<()>;
 }
 
 /// The query. `externalWorkspaces` is the surface Railway documents for OAuth
@@ -243,6 +255,31 @@ mutation ServiceCreate($input: ServiceCreateInput!) {
   }
 }
 ";
+
+/// Spinning down is Railway's own "Remove" on a deployment: the instance and
+/// its configuration stay, and `serviceInstanceRedeploy` brings it back later.
+const DEPLOYMENT_REMOVE_MUTATION: &str = r"
+mutation DeploymentRemove($id: String!) {
+  deploymentRemove(id: $id)
+}
+";
+
+/// Which deployment spinning down removes: the latest, unless the service has
+/// nothing running — never deployed, or already gone. Either is the caller's
+/// situation to hear about, not a provider fault.
+fn deployment_to_remove(latest: Option<Deployment>) -> RailwayResult<Deployment> {
+    match latest {
+        Some(deployment) if deployment.status != "REMOVED" && deployment.status != "REMOVING" => {
+            Ok(deployment)
+        }
+        Some(_) => Err(RailwayError::Rejected(
+            "the service is already spun down in this environment".to_owned(),
+        )),
+        None => Err(RailwayError::Rejected(
+            "the service has never been deployed in this environment".to_owned(),
+        )),
+    }
+}
 
 fn service_create_variables(project_id: &str, source: &ServiceSource) -> serde_json::Value {
     let source = match source {
@@ -421,6 +458,40 @@ impl RailwayApi for RailwayGraphQl {
 
         Ok(data.service_instance.into_instance())
     }
+
+    /// The mutation wants a deployment id, but callers think in services and
+    /// environments — so the instance is read first to find what is running.
+    async fn spin_down(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+    ) -> RailwayResult<()> {
+        let instance = self
+            .service_instance(access_token, service_id, environment_id)
+            .await?;
+
+        let deployment = deployment_to_remove(instance.latest_deployment)?;
+
+        let body = serde_json::json!({
+            "query": DEPLOYMENT_REMOVE_MUTATION,
+            "variables": { "id": deployment.id },
+        });
+
+        let envelope: GraphQlResponse<DeploymentRemoveMutation> =
+            self.post(access_token, &body, "deployment removal").await?;
+
+        if envelope
+            .into_data(RailwayError::Rejected)?
+            .deployment_remove
+        {
+            Ok(())
+        } else {
+            Err(RailwayError::Provider(anyhow::anyhow!(
+                "Railway answered the deployment removal with a refusal it did not explain"
+            )))
+        }
+    }
 }
 
 /// A GraphQL response. `data` and `errors` can both be present — a partial
@@ -576,6 +647,12 @@ struct ServiceNode {
 #[serde(rename_all = "camelCase")]
 struct ServiceCreateMutation {
     service_create: ServiceNode,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeploymentRemoveMutation {
+    deployment_remove: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -843,6 +920,51 @@ mod tests {
 
         let deployment = instance.latest_deployment.expect("should be present");
         assert_eq!(deployment.status, "SUCCESS");
+    }
+
+    fn deployment(status: &str) -> Deployment {
+        Deployment {
+            id: "deploy-1".to_owned(),
+            status: status.to_owned(),
+            created_at: None,
+        }
+    }
+
+    #[test]
+    fn spinning_down_removes_the_latest_deployment() {
+        let removed =
+            deployment_to_remove(Some(deployment("SUCCESS"))).expect("should be removable");
+
+        assert_eq!(removed.id, "deploy-1");
+    }
+
+    /// A deployment already gone, or on its way out, or never made: all leave
+    /// nothing to remove, and all are the caller's news rather than a fault.
+    #[test]
+    fn a_service_with_nothing_running_declines_to_spin_down() {
+        for latest in [
+            Some(deployment("REMOVED")),
+            Some(deployment("REMOVING")),
+            None,
+        ] {
+            let error = deployment_to_remove(latest).expect_err("should decline");
+
+            assert!(matches!(error, RailwayError::Rejected(_)));
+        }
+    }
+
+    #[test]
+    fn a_declined_removal_carries_railways_message() {
+        let error = serde_json::from_str::<GraphQlResponse<DeploymentRemoveMutation>>(
+            r#"{"data":null,"errors":[{"message":"Deployment not found"}]}"#,
+        )
+        .expect("body should parse")
+        .into_data(RailwayError::Rejected)
+        .expect_err("should fail");
+
+        assert!(
+            matches!(error, RailwayError::Rejected(message) if message == "Deployment not found")
+        );
     }
 
     /// A service with no instance in the asked-about environment is a `404`'s
