@@ -74,12 +74,14 @@ pub struct Service {
 /// what lets the route tests answer without a network.
 #[async_trait::async_trait]
 pub trait RailwayApi: Send + Sync + 'static {
-    /// Every project the token's owner can see, each carrying its services.
+    /// Every project the login granted access to, each carrying its services.
     async fn projects(&self, access_token: &Secret) -> RailwayResult<Vec<Project>>;
 }
 
-/// The query. Railway paginates with Relay connections, so both levels arrive
-/// as `edges { node { .. } }` and are flattened on the way out.
+/// The query. `externalWorkspaces` is the surface Railway documents for OAuth
+/// tokens — it returns exactly the workspaces and projects picked on the
+/// consent screen, as plain lists. Only `services` is a Relay connection,
+/// flattened on the way out.
 const PROJECTS_QUERY: &str = r"
 query Projects {
   externalWorkspaces {
@@ -224,13 +226,14 @@ fn is_authorization_failure(message: &str) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
 struct ExternalWorkspacesQuery {
     external_workspaces: Vec<ExternalWorkspace>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ExternalWorkspace {
-    projects: Connection<ProjectNode>,
+    projects: Vec<ProjectNode>,
 }
 
 impl ExternalWorkspacesQuery {
@@ -240,11 +243,8 @@ impl ExternalWorkspacesQuery {
         let mut projects: Vec<Project> = self
             .external_workspaces
             .into_iter()
-            .map(|v| v.projects.edges)
-            .flatten()
-            .into_iter()
-            .map(|edge| {
-                let node = edge.node;
+            .flat_map(|workspace| workspace.projects)
+            .map(|node| {
                 let mut services: Vec<Service> = node
                     .services
                     .edges
@@ -320,13 +320,15 @@ mod tests {
     #[test]
     fn projects_and_services_come_back_sorted_by_name() {
         let projects = parse(
-            r#"{"data":{"me":{"projects":{"edges":[
-                {"node":{"id":"p2","name":"zeta","description":null,"createdAt":null,
-                  "services":{"edges":[
-                    {"node":{"id":"s2","name":"worker","createdAt":null}},
-                    {"node":{"id":"s1","name":"api","createdAt":null}}]}}},
-                {"node":{"id":"p1","name":"alpha","description":"first","createdAt":null,
-                  "services":{"edges":[]}}}]}}}}"#,
+            r#"{"data":{"externalWorkspaces":[
+                {"id":"w1","name":"one","projects":[
+                    {"id":"p2","name":"zeta","description":null,"createdAt":null,
+                      "services":{"edges":[
+                        {"node":{"id":"s2","name":"worker","createdAt":null}},
+                        {"node":{"id":"s1","name":"api","createdAt":null}}]}}]},
+                {"id":"w2","name":"two","projects":[
+                    {"id":"p1","name":"alpha","description":"first","createdAt":null,
+                      "services":{"edges":[]}}]}]}}"#,
         )
         .expect("should parse");
 
@@ -344,11 +346,15 @@ mod tests {
         assert_eq!(services, ["api", "worker"]);
     }
 
-    /// A project with no services is a project, not an error.
+    /// Nothing granted on the consent screen is an empty dashboard, not an
+    /// error — whether no workspaces came back or one came back empty.
     #[test]
-    fn an_empty_connection_is_an_empty_list() {
-        let projects = parse(r#"{"data":{"me":{"projects":{"edges":[]}}}}"#).expect("should parse");
+    fn no_granted_projects_is_an_empty_list() {
+        let projects = parse(r#"{"data":{"externalWorkspaces":[]}}"#).expect("should parse");
+        assert!(projects.is_empty());
 
+        let projects =
+            parse(r#"{"data":{"externalWorkspaces":[{"projects":[]}]}}"#).expect("should parse");
         assert!(projects.is_empty());
     }
 

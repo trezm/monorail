@@ -32,6 +32,7 @@ node_modules/
 .idea/
 .vscode/
 *.swp
+*~
 
 # macOS
 .DS_Store
