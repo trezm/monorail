@@ -4,6 +4,7 @@
 //! build the real application with [`app`] and drive it in-process, without
 //! binding a port.
 
+pub mod autoscaler;
 pub mod config;
 pub mod constants;
 pub mod db;
@@ -108,8 +109,9 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     let addr = SocketAddr::from((config.host, config.port));
     let oauth = config::OAuthConfig::from_env()?;
     tracing::info!(issuer = %oauth.issuer, scopes = ?oauth.scopes, "Railway login enabled");
-    let railway = Arc::new(RailwayGraphQl::new(&oauth)?);
-    let state = AppState::new(config, Arc::new(RailwayAuth::new(oauth)?), railway);
+    let railway: Arc<dyn RailwayApi> = Arc::new(RailwayGraphQl::new(&oauth)?);
+    let auth: Arc<dyn AuthProvider> = Arc::new(RailwayAuth::new(oauth)?);
+    let state = AppState::new(config, auth.clone(), railway.clone());
 
     state.db().ping().await.with_context(|| {
         format!(
@@ -118,6 +120,16 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         )
     })?;
     tracing::info!(database = %state.config().database_url.redacted(), "database connected");
+
+    // Spawned, not joined: it has no shutdown of its own, and dies with the
+    // process. A rule mid-sweep at that moment is simply due again next boot.
+    if state.config().autoscaler_enabled {
+        let tick = state.config().autoscaler_tick;
+        tokio::spawn(
+            autoscaler::Autoscaler::new(state.autoscaling_handle(), railway, auth, tick).run(),
+        );
+        tracing::info!(tick_secs = tick.as_secs(), "autoscaler running");
+    }
 
     let app = app(state);
 

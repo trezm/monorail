@@ -118,6 +118,37 @@ pub struct Deployment {
     pub created_at: Option<DateTime<Utc>>,
 }
 
+/// The measurements the autoscaler reads, out of the many Railway's metrics
+/// query accepts. CPU is in vCPU cores; the rest are in gigabytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Measurement {
+    CpuUsage,
+    MemoryUsageGb,
+    NetworkRxGb,
+    NetworkTxGb,
+}
+
+impl Measurement {
+    /// The `MetricMeasurement` enum value Railway's schema names.
+    #[must_use]
+    pub fn as_graphql(self) -> &'static str {
+        match self {
+            Self::CpuUsage => "CPU_USAGE",
+            Self::MemoryUsageGb => "MEMORY_USAGE_GB",
+            Self::NetworkRxGb => "NETWORK_RX_GB",
+            Self::NetworkTxGb => "NETWORK_TX_GB",
+        }
+    }
+}
+
+/// One sampled value of one [`Measurement`]. `ts` is Unix seconds, as Railway
+/// reports it.
+#[derive(Debug, Clone, Copy, PartialEq, Deserialize)]
+pub struct MetricSample {
+    pub ts: i64,
+    pub value: f64,
+}
+
 /// Where a new service's code comes from — the only two sources creation
 /// accepts today. Externally tagged, so on the wire it reads
 /// `{"docker_image": "nginx:latest"}` or `{"github_repo": "owner/repo"}`.
@@ -183,6 +214,27 @@ pub trait RailwayApi: Send + Sync + 'static {
         service_id: &str,
         environment_id: &str,
     ) -> RailwayResult<ServiceInstance>;
+
+    /// One measurement's samples for a service since `since`, oldest first. A
+    /// service emitting nothing — not deployed, just created — is an empty
+    /// list, not an error.
+    async fn service_metrics(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        measurement: Measurement,
+        since: DateTime<Utc>,
+    ) -> RailwayResult<Vec<MetricSample>>;
+
+    /// Sets the replica count of one service in one environment, and deploys
+    /// it — Railway stages instance updates until a deploy applies them.
+    async fn set_replicas(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+        replicas: i64,
+    ) -> RailwayResult<()>;
 }
 
 /// The query. `externalWorkspaces` is the surface Railway documents for OAuth
@@ -229,6 +281,26 @@ query ServiceInstance($serviceId: String!, $environmentId: String!) {
     restartPolicyMaxRetries
     latestDeployment { id status createdAt }
   }
+}
+";
+
+/// `sampleRateSeconds` coarsens server-side so the caller is not handed a
+/// point per scrape for a window it will aggregate anyway.
+const METRICS_QUERY: &str = r"
+query Metrics($serviceId: String!, $startDate: DateTime!, $measurements: [MetricMeasurement!]!, $sampleRateSeconds: Int) {
+  metrics(serviceId: $serviceId, startDate: $startDate, measurements: $measurements, sampleRateSeconds: $sampleRateSeconds) {
+    measurement
+    values { ts value }
+  }
+}
+";
+
+/// One document on purpose: GraphQL runs root mutation fields in order, so the
+/// deploy that applies the staged replica change cannot race the update.
+const SET_REPLICAS_MUTATION: &str = r"
+mutation SetReplicas($serviceId: String!, $environmentId: String!, $numReplicas: Int!) {
+  serviceInstanceUpdate(serviceId: $serviceId, environmentId: $environmentId, input: { numReplicas: $numReplicas })
+  serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
 }
 ";
 
@@ -420,6 +492,55 @@ impl RailwayApi for RailwayGraphQl {
         })?;
 
         Ok(data.service_instance.into_instance())
+    }
+
+    async fn service_metrics(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        measurement: Measurement,
+        since: DateTime<Utc>,
+    ) -> RailwayResult<Vec<MetricSample>> {
+        let body = serde_json::json!({
+            "query": METRICS_QUERY,
+            "variables": {
+                "serviceId": service_id,
+                "startDate": since,
+                "measurements": [measurement.as_graphql()],
+                "sampleRateSeconds": crate::constants::AUTOSCALER_SAMPLE_RATE_SECS,
+            },
+        });
+
+        let envelope: GraphQlResponse<MetricsQuery> =
+            self.post(access_token, &body, "metrics").await?;
+
+        Ok(envelope
+            .into_data(query_rejected("metrics"))?
+            .samples_for(measurement))
+    }
+
+    async fn set_replicas(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+        replicas: i64,
+    ) -> RailwayResult<()> {
+        let body = serde_json::json!({
+            "query": SET_REPLICAS_MUTATION,
+            "variables": {
+                "serviceId": service_id,
+                "environmentId": environment_id,
+                "numReplicas": replicas,
+            },
+        });
+
+        let envelope: GraphQlResponse<serde_json::Value> =
+            self.post(access_token, &body, "replica update").await?;
+
+        envelope.into_data(RailwayError::Rejected)?;
+
+        Ok(())
     }
 }
 
@@ -674,6 +795,32 @@ struct DeploymentNode {
     created_at: Option<DateTime<Utc>>,
 }
 
+#[derive(Debug, Deserialize)]
+struct MetricsQuery {
+    #[serde(default)]
+    metrics: Vec<MetricsResultNode>,
+}
+
+impl MetricsQuery {
+    /// The one asked-about series. Railway returns a list because the query
+    /// accepts several measurements; anything unexpected is dropped rather
+    /// than misread as the wanted one.
+    fn samples_for(self, measurement: Measurement) -> Vec<MetricSample> {
+        self.metrics
+            .into_iter()
+            .find(|node| node.measurement == measurement.as_graphql())
+            .map(|node| node.values)
+            .unwrap_or_default()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct MetricsResultNode {
+    measurement: String,
+    #[serde(default)]
+    values: Vec<MetricSample>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -843,6 +990,42 @@ mod tests {
 
         let deployment = instance.latest_deployment.expect("should be present");
         assert_eq!(deployment.status, "SUCCESS");
+    }
+
+    fn parse_metrics(body: &str, measurement: Measurement) -> RailwayResult<Vec<MetricSample>> {
+        serde_json::from_str::<GraphQlResponse<MetricsQuery>>(body)
+            .expect("body should parse")
+            .into_data(query_rejected("metrics"))
+            .map(|query| query.samples_for(measurement))
+    }
+
+    #[test]
+    fn only_the_asked_about_measurement_is_read() {
+        let samples = parse_metrics(
+            r#"{"data":{"metrics":[
+                {"measurement":"MEMORY_USAGE_GB","values":[{"ts":1,"value":9.0}]},
+                {"measurement":"CPU_USAGE","values":[{"ts":1,"value":0.5},{"ts":61,"value":0.7}]}]}}"#,
+            Measurement::CpuUsage,
+        )
+        .expect("should parse");
+
+        assert_eq!(
+            samples,
+            [
+                MetricSample { ts: 1, value: 0.5 },
+                MetricSample { ts: 61, value: 0.7 },
+            ]
+        );
+    }
+
+    /// A service emitting nothing answers with no series at all, and that is an
+    /// empty list rather than an error — there is nothing wrong to report.
+    #[test]
+    fn a_silent_service_has_no_samples() {
+        let samples = parse_metrics(r#"{"data":{"metrics":[]}}"#, Measurement::MemoryUsageGb)
+            .expect("should parse");
+
+        assert!(samples.is_empty());
     }
 
     /// A service with no instance in the asked-about environment is a `404`'s

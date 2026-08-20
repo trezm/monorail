@@ -27,6 +27,7 @@ The service requires Postgres and refuses to start without it. See
 | `src/shutdown.rs` | SIGINT/SIGTERM handling. |
 | `src/bin/migrate.rs` | Applies pending migrations and exits. |
 | `src/secret.rs` | A wrapper that keeps a string out of logs. |
+| `src/autoscaler.rs` | The horizontal autoscaling loop. |
 | `src/routes/` | HTTP handlers, one module per resource. |
 | `src/services/` | Business logic, one trait per capability. |
 | `migrations/` | Schema history, embedded into the binary. |
@@ -257,6 +258,36 @@ browser back through a login rather than a `400` it can do nothing with.
 Renewal is per-request and unsynchronised: two requests arriving on the same
 expired session both refresh, and the second write wins. Both tokens work, so
 the cost is a wasted call rather than a broken session.
+
+## Autoscaling
+
+`POST /api/v1/services/{id}/autoscaling` creates a horizontal autoscaling rule
+for a service: a metric (`CPU`, `MEMORY`, `NETWORK_RX`, `NETWORK_TX`), a
+min/max threshold band in the metric's unit (vCPU cores, or gigabytes), a poll
+frequency, and the environment to scale in. One rule per service and metric;
+`GET` lists the caller's, `DELETE .../{rule_id}` removes one.
+
+[`src/services/autoscaling.rs`](src/services/autoscaling.rs) is the store —
+`AutoscaleStore` the capability, `PgAutoscaleStore` the implementation — and
+[`src/autoscaler.rs`](src/autoscaler.rs) is the loop that acts on it. Each
+tick (`API_AUTOSCALER_TICK_SECS`) it takes the rules whose poll frequency has
+elapsed, averages the metric over the last five minutes via Railway's
+`metrics` query, and moves the replica count by one when the average leaves
+the band — never below one replica. Replica changes go out as
+`serviceInstanceUpdate` plus `serviceInstanceDeployV2`, because Railway stages
+instance updates until a deploy applies them.
+
+The loop authenticates as the rule's owner, reading their freshest live
+session and renewing its access token through the same refresh flow requests
+use — written back by session row, since the loop holds no cookie. An owner
+with no live session has rules that wait, not rules that break.
+
+The loop is its own module with its dependencies passed in as handles, so it
+can detach into its own service; `API_AUTOSCALER_ENABLED=false` is that
+future's flag and today's off switch. Known simplifications, noted in the
+module: every sweep hits Postgres where a pass-through KV cache would do, and
+the aggregate is a plain mean where a trimmed mean or percentile would resist
+outliers better.
 
 ## Configuration
 

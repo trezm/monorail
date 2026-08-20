@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import AutoscalingRules from './AutoscalingRules';
 import {
   environments as fetchEnvironments,
   serviceInstance,
@@ -139,7 +140,10 @@ export default function ProjectServices({ project, active }: { project: Project;
               )}
             </div>
             {selected !== null && (
-              <InstanceDetails state={instances[service.id] ?? { status: 'loading' }} />
+              <>
+                <InstanceDetails state={instances[service.id] ?? { status: 'loading' }} />
+                <AutoscalingRules serviceId={service.id} environmentId={selected} />
+              </>
             )}
           </li>
         ))}
