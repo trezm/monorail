@@ -9,7 +9,8 @@ bazel build //ui       # static site into bazel-bin/ui/dist
 
 One page: a Login with Railway button, or — once there is a session — an
 account bar and the Railway projects on that account, each expanding to the
-services inside it.
+services inside it. An expanded project offers a dropdown of its environments
+and shows how each service is configured and deployed in the selected one.
 
 ## Layout
 
@@ -19,9 +20,10 @@ services inside it.
 | `src/components/App.tsx` | The one island, hydrated with `client:load`. |
 | `src/components/LoginButton.tsx` | The button. |
 | `src/components/UserMenu.tsx` | Name, avatar and log out, top right. |
-| `src/components/ProjectList.tsx` | The projects, and their services. |
+| `src/components/ProjectList.tsx` | The projects, as expandable rows. |
+| `src/components/ProjectServices.tsx` | One project's services, per selected environment. |
 | `src/lib/session.tsx` | The session context, provider and hook. |
-| `src/lib/projects.ts` | `GET /api/v1/projects`, and the types it returns. |
+| `src/lib/projects.ts` | The `/api/v1` project reads, and the types they return. |
 | `src/styles/global.css` | Everything visual. No framework. |
 | `astro.config.mjs` | React integration, and the output paths Bazel overrides. |
 
@@ -57,10 +59,10 @@ component. That is what `App.tsx` is for, and it is why logging out needs no
 page reload: `DELETE /auth/session` clears the `HttpOnly` cookie server-side —
 nothing else can — and the provider then tells every component at once.
 
-A `401` from `GET /api/v1/projects` means something else: the cookie is still
-good and the Railway token behind it is spent. Nothing in the browser can renew
-it, so `ProjectList` ends the session through the provider, which puts the login
-button back.
+A `401` from any `/api/v1` project read means something else: the cookie is
+still good and the Railway token behind it is spent. Nothing in the browser can
+renew it, so the component that hit it ends the session through the provider,
+which puts the login button back.
 
 ## Configuration
 

@@ -9,7 +9,10 @@
 //! The API is GraphQL, and one query returns projects with their services
 //! nested inside — which is why [`RailwayApi`] has no separate `services()`.
 //! Asking twice would be two round trips for a shape the server already
-//! assembles.
+//! assembles. Environments and service instances are separate queries because
+//! they are read on demand: an instance is keyed by service *and* environment,
+//! and fetching every combination up front is exactly the oversized query this
+//! surface has answered with a `503` before.
 
 use anyhow::Context as _;
 use chrono::{DateTime, Utc};
@@ -38,6 +41,11 @@ pub enum RailwayError {
     #[error("{0}")]
     Rejected(String),
 
+    /// The thing asked about does not exist on Railway — a service with no
+    /// instance in the requested environment, an id that names nothing.
+    #[error("{0}")]
+    NotFound(String),
+
     /// Railway was reached but did not answer usefully.
     #[error(transparent)]
     Provider(anyhow::Error),
@@ -51,6 +59,7 @@ impl From<RailwayError> for ApiError {
             // what fixes it.
             RailwayError::TokenRejected => Self::Unauthorized,
             RailwayError::Rejected(message) => Self::UnprocessableEntity(message),
+            RailwayError::NotFound(message) => Self::NotFound(message),
             RailwayError::Provider(source) => Self::Unavailable(source),
         }
     }
@@ -71,6 +80,41 @@ pub struct Project {
 pub struct Service {
     pub id: String,
     pub name: String,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// One environment of a [`Project`] — production, staging, whatever else the
+/// project defines.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Environment {
+    pub id: String,
+    pub name: String,
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// How one [`Service`] is configured and deployed in one [`Environment`].
+///
+/// Most fields are optional on Railway's side: an instance that has never
+/// overridden a setting reports `null` for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct ServiceInstance {
+    pub id: String,
+    pub start_command: Option<String>,
+    pub build_command: Option<String>,
+    pub root_directory: Option<String>,
+    pub healthcheck_path: Option<String>,
+    pub region: Option<String>,
+    pub num_replicas: Option<i64>,
+    pub restart_policy_type: Option<String>,
+    pub restart_policy_max_retries: Option<i64>,
+    pub latest_deployment: Option<Deployment>,
+}
+
+/// The most recent deployment of a [`ServiceInstance`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct Deployment {
+    pub id: String,
+    pub status: String,
     pub created_at: Option<DateTime<Utc>>,
 }
 
@@ -122,6 +166,23 @@ pub trait RailwayApi: Send + Sync + 'static {
         project_id: &str,
         source: &ServiceSource,
     ) -> RailwayResult<Service>;
+
+    /// The durable environments of one project. The ephemeral ones Railway
+    /// creates per pull request are excluded.
+    async fn environments(
+        &self,
+        access_token: &Secret,
+        project_id: &str,
+    ) -> RailwayResult<Vec<Environment>>;
+
+    /// How a service is configured in one environment.
+    /// [`RailwayError::NotFound`] when it has no instance there.
+    async fn service_instance(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+    ) -> RailwayResult<ServiceInstance>;
 }
 
 /// The query. `externalWorkspaces` is the surface Railway documents for OAuth
@@ -140,6 +201,33 @@ query Projects {
       createdAt
       services { edges { node { id name createdAt } } }
     }
+  }
+}
+";
+
+/// `isEphemeral: false` drops the environments Railway creates per pull
+/// request; they churn too fast to be worth a place in a dropdown.
+const ENVIRONMENTS_QUERY: &str = r"
+query Environments($projectId: String!) {
+  environments(projectId: $projectId, isEphemeral: false) {
+    edges { node { id name createdAt } }
+  }
+}
+";
+
+const SERVICE_INSTANCE_QUERY: &str = r"
+query ServiceInstance($serviceId: String!, $environmentId: String!) {
+  serviceInstance(serviceId: $serviceId, environmentId: $environmentId) {
+    id
+    startCommand
+    buildCommand
+    rootDirectory
+    healthcheckPath
+    region
+    numReplicas
+    restartPolicyType
+    restartPolicyMaxRetries
+    latestDeployment { id status createdAt }
   }
 }
 ";
@@ -258,11 +346,7 @@ impl RailwayApi for RailwayGraphQl {
             .await?;
 
         Ok(envelope
-            .into_data(|messages| {
-                RailwayError::Provider(anyhow::anyhow!(
-                    "Railway rejected the projects query: {messages}"
-                ))
-            })?
+            .into_data(query_rejected("projects"))?
             .into_projects())
     }
 
@@ -287,6 +371,55 @@ impl RailwayApi for RailwayGraphQl {
             name: node.name,
             created_at: node.created_at,
         })
+    }
+
+    async fn environments(
+        &self,
+        access_token: &Secret,
+        project_id: &str,
+    ) -> RailwayResult<Vec<Environment>> {
+        let body = serde_json::json!({
+            "query": ENVIRONMENTS_QUERY,
+            "variables": { "projectId": project_id },
+        });
+
+        let envelope: GraphQlResponse<EnvironmentsQuery> =
+            self.post(access_token, &body, "environments").await?;
+
+        Ok(envelope
+            .into_data(query_rejected("environments"))?
+            .into_environments())
+    }
+
+    async fn service_instance(
+        &self,
+        access_token: &Secret,
+        service_id: &str,
+        environment_id: &str,
+    ) -> RailwayResult<ServiceInstance> {
+        let body = serde_json::json!({
+            "query": SERVICE_INSTANCE_QUERY,
+            "variables": {
+                "serviceId": service_id,
+                "environmentId": environment_id,
+            },
+        });
+
+        let envelope: GraphQlResponse<ServiceInstanceQuery> =
+            self.post(access_token, &body, "service instance").await?;
+
+        // Asking about a service with no instance in the environment is an
+        // error entry with a `200`, not a null — and a `404`'s worth of error,
+        // not an unhealthy provider.
+        let data = envelope.into_data(|messages| {
+            if is_missing_resource(&messages) {
+                RailwayError::NotFound(messages)
+            } else {
+                query_rejected("service instance")(messages)
+            }
+        })?;
+
+        Ok(data.service_instance.into_instance())
     }
 }
 
@@ -334,12 +467,28 @@ impl<T> GraphQlResponse<T> {
     }
 }
 
+/// The [`GraphQlResponse::into_data`] rejection for a read: a query Railway
+/// declines is the provider's problem, not the caller's.
+fn query_rejected(operation: &'static str) -> impl FnOnce(String) -> RailwayError {
+    move |messages| {
+        RailwayError::Provider(anyhow::anyhow!(
+            "Railway rejected the {operation} query: {messages}"
+        ))
+    }
+}
+
 fn is_authorization_failure(message: &str) -> bool {
     let message = message.to_ascii_lowercase();
 
     message.contains("not authorized")
         || message.contains("unauthorized")
         || message.contains("unauthenticated")
+}
+
+fn is_missing_resource(message: &str) -> bool {
+    let message = message.to_ascii_lowercase();
+
+    message.contains("not found") || message.contains("does not exist")
 }
 
 #[derive(Debug, Deserialize)]
@@ -429,6 +578,102 @@ struct ServiceCreateMutation {
     service_create: ServiceNode,
 }
 
+#[derive(Debug, Deserialize)]
+struct EnvironmentsQuery {
+    environments: Connection<EnvironmentNode>,
+}
+
+impl EnvironmentsQuery {
+    /// Sorted by name, like the projects, and for the same reason.
+    fn into_environments(self) -> Vec<Environment> {
+        let mut environments: Vec<Environment> = self
+            .environments
+            .edges
+            .into_iter()
+            .map(|edge| Environment {
+                id: edge.node.id,
+                name: edge.node.name,
+                created_at: edge.node.created_at,
+            })
+            .collect();
+
+        environments.sort_by(|left, right| left.name.cmp(&right.name));
+
+        environments
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct EnvironmentNode {
+    id: String,
+    name: String,
+    #[serde(default)]
+    created_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceInstanceQuery {
+    service_instance: ServiceInstanceNode,
+}
+
+/// Every field beyond `id` defaults rather than fails: the dashboard losing
+/// one detail Railway reshaped is better than losing the whole instance.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServiceInstanceNode {
+    id: String,
+    #[serde(default)]
+    start_command: Option<String>,
+    #[serde(default)]
+    build_command: Option<String>,
+    #[serde(default)]
+    root_directory: Option<String>,
+    #[serde(default)]
+    healthcheck_path: Option<String>,
+    #[serde(default)]
+    region: Option<String>,
+    #[serde(default)]
+    num_replicas: Option<i64>,
+    #[serde(default)]
+    restart_policy_type: Option<String>,
+    #[serde(default)]
+    restart_policy_max_retries: Option<i64>,
+    #[serde(default)]
+    latest_deployment: Option<DeploymentNode>,
+}
+
+impl ServiceInstanceNode {
+    fn into_instance(self) -> ServiceInstance {
+        ServiceInstance {
+            id: self.id,
+            start_command: self.start_command,
+            build_command: self.build_command,
+            root_directory: self.root_directory,
+            healthcheck_path: self.healthcheck_path,
+            region: self.region,
+            num_replicas: self.num_replicas,
+            restart_policy_type: self.restart_policy_type,
+            restart_policy_max_retries: self.restart_policy_max_retries,
+            latest_deployment: self.latest_deployment.map(|node| Deployment {
+                id: node.id,
+                status: node.status,
+                created_at: node.created_at,
+            }),
+        }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DeploymentNode {
+    id: String,
+    status: String,
+    #[serde(default)]
+    created_at: Option<DateTime<Utc>>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -436,12 +681,28 @@ mod tests {
     fn parse(body: &str) -> RailwayResult<Vec<Project>> {
         serde_json::from_str::<GraphQlResponse<ExternalWorkspacesQuery>>(body)
             .expect("body should parse")
-            .into_data(|messages| {
-                RailwayError::Provider(anyhow::anyhow!(
-                    "Railway rejected the projects query: {messages}"
-                ))
-            })
+            .into_data(query_rejected("projects"))
             .map(ExternalWorkspacesQuery::into_projects)
+    }
+
+    fn parse_environments(body: &str) -> RailwayResult<Vec<Environment>> {
+        serde_json::from_str::<GraphQlResponse<EnvironmentsQuery>>(body)
+            .expect("body should parse")
+            .into_data(query_rejected("environments"))
+            .map(EnvironmentsQuery::into_environments)
+    }
+
+    fn parse_instance(body: &str) -> RailwayResult<ServiceInstance> {
+        serde_json::from_str::<GraphQlResponse<ServiceInstanceQuery>>(body)
+            .expect("body should parse")
+            .into_data(|messages| {
+                if is_missing_resource(&messages) {
+                    RailwayError::NotFound(messages)
+                } else {
+                    query_rejected("service instance")(messages)
+                }
+            })
+            .map(|query| query.service_instance.into_instance())
     }
 
     #[test]
@@ -538,5 +799,60 @@ mod tests {
         .expect_err("should fail");
 
         assert!(matches!(error, RailwayError::Rejected(message) if message == "Project not found"));
+    }
+
+    #[test]
+    fn environments_come_back_sorted_by_name() {
+        let environments = parse_environments(
+            r#"{"data":{"environments":{"edges":[
+                {"node":{"id":"e2","name":"staging","createdAt":null}},
+                {"node":{"id":"e1","name":"production","createdAt":null}}]}}}"#,
+        )
+        .expect("should parse");
+
+        let names: Vec<_> = environments
+            .iter()
+            .map(|environment| environment.name.as_str())
+            .collect();
+        assert_eq!(names, ["production", "staging"]);
+    }
+
+    #[test]
+    fn an_instance_parses_with_every_optional_field_absent() {
+        let instance =
+            parse_instance(r#"{"data":{"serviceInstance":{"id":"i1"}}}"#).expect("should parse");
+
+        assert_eq!(instance.id, "i1");
+        assert_eq!(instance.start_command, None);
+        assert_eq!(instance.latest_deployment, None);
+    }
+
+    #[test]
+    fn an_instance_carries_its_latest_deployment() {
+        let instance = parse_instance(
+            r#"{"data":{"serviceInstance":{
+                "id":"i1","startCommand":"cargo run","region":"us-west2",
+                "numReplicas":2,"restartPolicyType":"ON_FAILURE",
+                "restartPolicyMaxRetries":10,
+                "latestDeployment":{"id":"d1","status":"SUCCESS","createdAt":null}}}}"#,
+        )
+        .expect("should parse");
+
+        assert_eq!(instance.region.as_deref(), Some("us-west2"));
+        assert_eq!(instance.num_replicas, Some(2));
+
+        let deployment = instance.latest_deployment.expect("should be present");
+        assert_eq!(deployment.status, "SUCCESS");
+    }
+
+    /// A service with no instance in the asked-about environment is a `404`'s
+    /// worth of error, not an unhealthy provider.
+    #[test]
+    fn a_missing_instance_is_not_found() {
+        let error =
+            parse_instance(r#"{"data":null,"errors":[{"message":"Service instance not found"}]}"#)
+                .expect_err("should fail");
+
+        assert!(matches!(error, RailwayError::NotFound(_)));
     }
 }

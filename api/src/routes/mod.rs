@@ -3,6 +3,7 @@
 pub mod auth;
 pub mod health;
 pub mod projects;
+pub mod services;
 pub mod users;
 
 use axum::Router;
@@ -16,5 +17,6 @@ use crate::state::AppState;
 pub fn api_v1() -> Router<AppState> {
     Router::new()
         .merge(projects::router())
+        .merge(services::router())
         .merge(users::router())
 }
