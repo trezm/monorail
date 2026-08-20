@@ -1,6 +1,11 @@
-//! A Railway service's per-environment instance.
+//! A Railway service's per-environment instance, and actions on it.
 
-use axum::{Router, extract::State, routing::get};
+use axum::{
+    Router,
+    extract::State,
+    http::StatusCode,
+    routing::{get, post},
+};
 use serde::Deserialize;
 
 use crate::{
@@ -11,7 +16,9 @@ use crate::{
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new().route("/services/{service_id}/instance", get(instance))
+    Router::new()
+        .route("/services/{service_id}/instance", get(instance))
+        .route("/services/{service_id}/spin-down", post(spin_down))
 }
 
 /// The environment rides in the query string rather than the path because it
@@ -36,4 +43,23 @@ async fn instance(
         .await?;
 
     Ok(Json(instance))
+}
+
+/// Removes the service's latest deployment in that environment — a spin-down,
+/// not a delete: the service and its configuration stay. `204` because removal
+/// leaves nothing to describe; the UI refetches the instance for the
+/// deployment's new state.
+async fn spin_down(
+    State(state): State<AppState>,
+    Path(service_id): Path<String>,
+    Query(query): Query<InstanceQuery>,
+    CurrentSession { token, session }: CurrentSession,
+) -> ApiResult<StatusCode> {
+    let access_token = state.credentials().access_token(&token, session).await?;
+    state
+        .railway()
+        .spin_down(&access_token, &service_id, &query.environment)
+        .await?;
+
+    Ok(StatusCode::NO_CONTENT)
 }
