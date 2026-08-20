@@ -94,3 +94,258 @@ async fn environments(
 
     Ok(Json(EnvironmentList { environments }))
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+    use serde_json::json;
+
+    use crate::{
+        secret::Secret,
+        services::{
+            auth::{AuthError, MockAuthProvider, TokenSet},
+            railway::{MockRailwayApi, RailwayError, Service, ServiceSource},
+            session::MockSessionStore,
+        },
+        testing,
+    };
+
+    fn created_service() -> Service {
+        Service {
+            id: "service-new".to_owned(),
+            name: "shiny-new-service".to_owned(),
+            created_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn the_projects_endpoint_requires_a_session() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(&app, testing::get("/projects")).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn the_environments_endpoint_requires_a_session() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) =
+            testing::send(&app, testing::get("/projects/project-1/environments")).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn creating_a_service_requires_a_session() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_json(
+                "/projects/project-1/services",
+                None,
+                &json!({ "source": { "docker_image": "nginx:latest" } }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn a_service_is_created_from_a_github_repo() {
+        let mut sessions = MockSessionStore::new();
+        let cookie = testing::logged_in(&mut sessions, testing::fresh_tokens());
+
+        let mut railway = MockRailwayApi::new();
+        railway
+            .expect_create_service()
+            .withf(|_, project_id, source| {
+                project_id == "project-1"
+                    && *source == ServiceSource::GithubRepo("railwayapp/starters".to_owned())
+            })
+            .times(1)
+            .returning(|_, _, _| Ok(created_service()));
+
+        let app =
+            super::router().with_state(testing::state(MockAuthProvider::new(), sessions, railway));
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_json(
+                "/projects/project-1/services",
+                Some(&cookie),
+                &json!({ "source": { "github_repo": "railwayapp/starters" } }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::CREATED);
+        assert_eq!(body["id"], "service-new");
+    }
+
+    #[tokio::test]
+    async fn a_blank_source_never_reaches_railway() {
+        let mut sessions = MockSessionStore::new();
+        let cookie = testing::logged_in(&mut sessions, testing::fresh_tokens());
+
+        let mut railway = MockRailwayApi::new();
+        railway.expect_create_service().never();
+
+        let app =
+            super::router().with_state(testing::state(MockAuthProvider::new(), sessions, railway));
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_json(
+                "/projects/project-1/services",
+                Some(&cookie),
+                &json!({ "source": { "docker_image": "   " } }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "unprocessable_entity");
+        assert_eq!(body["error"]["message"], "docker_image must not be empty");
+    }
+
+    /// Only the two supported sources deserialize; anything else is caught by
+    /// the extractor and answers on the standard envelope.
+    #[tokio::test]
+    async fn an_unsupported_source_kind_is_rejected() {
+        let mut sessions = MockSessionStore::new();
+        let cookie = testing::logged_in(&mut sessions, testing::fresh_tokens());
+
+        let mut railway = MockRailwayApi::new();
+        railway.expect_create_service().never();
+
+        let app =
+            super::router().with_state(testing::state(MockAuthProvider::new(), sessions, railway));
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_json(
+                "/projects/project-1/services",
+                Some(&cookie),
+                &json!({ "source": { "helm_chart": "bitnami/nginx" } }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "unprocessable_entity");
+    }
+
+    /// Railway declining the mutation is the caller's problem to fix, and its
+    /// message survives the trip — not a `503` pretending the provider is
+    /// down.
+    #[tokio::test]
+    async fn railways_rejection_reaches_the_caller() {
+        let mut sessions = MockSessionStore::new();
+        let cookie = testing::logged_in(&mut sessions, testing::fresh_tokens());
+
+        let mut railway = MockRailwayApi::new();
+        railway
+            .expect_create_service()
+            .returning(|_, _, _| Err(RailwayError::Rejected("Project not found".to_owned())));
+
+        let app =
+            super::router().with_state(testing::state(MockAuthProvider::new(), sessions, railway));
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_json(
+                "/projects/project-forbidden/services",
+                Some(&cookie),
+                &json!({ "source": { "docker_image": "nginx:latest" } }),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["message"], "Project not found");
+    }
+
+    /// A session outlives the access token it was opened with, so a stale one
+    /// is renewed in place — and written back without losing a refresh token
+    /// the provider did not rotate — rather than logging the user out.
+    #[tokio::test]
+    async fn an_expired_access_token_is_renewed_before_railway_is_read() {
+        let mut sessions = MockSessionStore::new();
+        let cookie = testing::logged_in(
+            &mut sessions,
+            testing::expired_tokens(Some(Secret::new("refresh-ok"))),
+        );
+        sessions
+            .expect_renew()
+            .withf(|_, tokens| {
+                tokens.access_token.expose() == "access-renewed"
+                    && tokens.refresh_token.as_ref().map(Secret::expose) == Some("refresh-ok")
+            })
+            .times(1)
+            .returning(|_, _| Ok(()));
+
+        let mut auth = MockAuthProvider::new();
+        auth.expect_refresh()
+            .withf(|refresh_token| refresh_token.expose() == "refresh-ok")
+            .times(1)
+            .returning(|_| {
+                Ok(TokenSet {
+                    access_token: Secret::new("access-renewed"),
+                    refresh_token: None,
+                    id_token: None,
+                    scope: "openid email".to_owned(),
+                    expires_at: chrono::Utc::now() + chrono::TimeDelta::seconds(3600),
+                })
+            });
+
+        let mut railway = MockRailwayApi::new();
+        railway
+            .expect_projects()
+            .withf(|access_token| access_token.expose() == "access-renewed")
+            .times(1)
+            .returning(|_| Ok(Vec::new()));
+
+        let app = super::router().with_state(testing::state(auth, sessions, railway));
+
+        let (status, _) = testing::send(&app, testing::get_with_cookie("/projects", &cookie)).await;
+
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    /// A login that came back without a refresh token, or with one the
+    /// provider no longer honours, has nothing left to renew: both send the
+    /// browser back through a login rather than reporting a bad request, and
+    /// the spent token never reaches Railway.
+    #[tokio::test]
+    async fn an_unrenewable_access_token_asks_for_a_new_login() {
+        for tokens in [
+            testing::expired_tokens(None),
+            testing::expired_tokens(Some(Secret::new("refresh-revoked"))),
+        ] {
+            let mut sessions = MockSessionStore::new();
+            let cookie = testing::logged_in(&mut sessions, tokens);
+
+            let mut auth = MockAuthProvider::new();
+            auth.expect_refresh()
+                .returning(|_| Err(AuthError::InvalidGrant));
+
+            let mut railway = MockRailwayApi::new();
+            railway.expect_projects().never();
+
+            let app = super::router().with_state(testing::state(auth, sessions, railway));
+
+            let (status, body) =
+                testing::send(&app, testing::get_with_cookie("/projects", &cookie)).await;
+
+            assert_eq!(status, StatusCode::UNAUTHORIZED);
+            assert_eq!(body["error"]["code"], "unauthorized");
+        }
+    }
+}
