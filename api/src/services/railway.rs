@@ -82,25 +82,15 @@ pub trait RailwayApi: Send + Sync + 'static {
 /// as `edges { node { .. } }` and are flattened on the way out.
 const PROJECTS_QUERY: &str = r"
 query Projects {
-  me {
+  externalWorkspaces {
+    id
+    name
     projects {
-      edges {
-        node {
-          id
-          name
-          description
-          createdAt
-          services {
-            edges {
-              node {
-                id
-                name
-                createdAt
-              }
-            }
-          }
-        }
-      }
+      id
+      name
+      description
+      createdAt
+      services { edges { node { id name createdAt } } }
     }
   }
 }
@@ -168,8 +158,8 @@ impl RailwayApi for RailwayGraphQl {
             )));
         }
 
-        let envelope: GraphQlResponse<MeQuery> =
-            serde_json::from_slice(&body).map_err(|error| {
+        let envelope: GraphQlResponse<ExternalWorkspacesQuery> = serde_json::from_slice(&body)
+            .map_err(|error| {
                 RailwayError::Provider(
                     anyhow::Error::new(error)
                         .context("the projects response was not the expected shape"),
@@ -234,23 +224,24 @@ fn is_authorization_failure(message: &str) -> bool {
 }
 
 #[derive(Debug, Deserialize)]
-struct MeQuery {
-    me: Me,
+struct ExternalWorkspacesQuery {
+    external_workspaces: Vec<ExternalWorkspace>,
 }
 
 #[derive(Debug, Deserialize)]
-struct Me {
+struct ExternalWorkspace {
     projects: Connection<ProjectNode>,
 }
 
-impl MeQuery {
+impl ExternalWorkspacesQuery {
     /// Both levels are sorted by name, so the dashboard does not reshuffle
     /// between requests over an order the API never promised.
     fn into_projects(self) -> Vec<Project> {
         let mut projects: Vec<Project> = self
-            .me
-            .projects
-            .edges
+            .external_workspaces
+            .into_iter()
+            .map(|v| v.projects.edges)
+            .flatten()
             .into_iter()
             .map(|edge| {
                 let node = edge.node;
@@ -320,10 +311,10 @@ mod tests {
     use super::*;
 
     fn parse(body: &str) -> RailwayResult<Vec<Project>> {
-        serde_json::from_str::<GraphQlResponse<MeQuery>>(body)
+        serde_json::from_str::<GraphQlResponse<ExternalWorkspacesQuery>>(body)
             .expect("body should parse")
             .into_data()
-            .map(MeQuery::into_projects)
+            .map(ExternalWorkspacesQuery::into_projects)
     }
 
     #[test]
