@@ -17,7 +17,8 @@ use crate::{
     db::Database,
     services::{
         auth::AuthProvider,
-        session::{PgSessionStore, SessionStore},
+        railway::RailwayApi,
+        session::{Credentials, PgSessionStore, SessionStore},
     },
 };
 
@@ -26,6 +27,7 @@ pub struct AppState {
     config: Arc<Config>,
     database: Database,
     auth: Arc<dyn AuthProvider>,
+    railway: Arc<dyn RailwayApi>,
     sessions: Arc<dyn SessionStore>,
     started_at: Instant,
 }
@@ -36,10 +38,11 @@ impl AppState {
     /// Infallible and synchronous: the pool connects lazily, so nothing here
     /// touches the network. See [`Database::new`].
     ///
-    /// The provider is passed in rather than built here because building one
-    /// can fail, and because it is what lets a test install a stub.
+    /// The login provider and the Railway API client are passed in rather than
+    /// built here because building either can fail, and because it is what lets
+    /// a test install a stub.
     #[must_use]
-    pub fn new(config: Config, auth: Arc<dyn AuthProvider>) -> Self {
+    pub fn new(config: Config, auth: Arc<dyn AuthProvider>, railway: Arc<dyn RailwayApi>) -> Self {
         let database = Database::new(&config);
         let ttl = TimeDelta::from_std(config.session_ttl)
             .unwrap_or_else(|_| TimeDelta::try_days(14).unwrap_or_default());
@@ -49,6 +52,7 @@ impl AppState {
             config: Arc::new(config),
             database,
             auth,
+            railway,
             sessions,
             started_at: Instant::now(),
         }
@@ -80,6 +84,19 @@ impl AppState {
     #[must_use]
     pub fn auth(&self) -> &dyn AuthProvider {
         self.auth.as_ref()
+    }
+
+    #[must_use]
+    pub fn railway(&self) -> &dyn RailwayApi {
+        self.railway.as_ref()
+    }
+
+    /// The Railway credential behind a session, renewed on demand. Borrows both
+    /// halves rather than storing a third handle: it is a pairing of two things
+    /// the state already owns.
+    #[must_use]
+    pub fn credentials(&self) -> Credentials<'_> {
+        Credentials::new(self.sessions(), self.auth())
     }
 
     #[must_use]

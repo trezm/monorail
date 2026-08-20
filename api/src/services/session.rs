@@ -22,11 +22,12 @@ use sha2::{Digest as _, Sha256};
 use uuid::Uuid;
 
 use crate::{
+    constants::ACCESS_TOKEN_EXPIRY_SKEW_SECS,
     db::{Database, DbError},
     error::ApiError,
     schema::{sessions, users},
     secret::{Secret, random_token},
-    services::auth::{RailwayIdentity, TokenSet},
+    services::auth::{AuthError, AuthProvider, RailwayIdentity, TokenSet},
 };
 
 pub type SessionResult<T> = Result<T, SessionError>;
@@ -135,8 +136,111 @@ pub trait SessionStore: Send + Sync + 'static {
     /// expired. Expiry is enforced here rather than trusted from the cookie.
     async fn lookup(&self, token: &SessionToken) -> SessionResult<Option<Session>>;
 
+    /// Replaces the Railway tokens on a live session, after a refresh.
+    ///
+    /// Does not extend the session itself: how long a login lasts is this
+    /// service's decision and not the provider's. A token naming no session is
+    /// not an error — the session ended while the refresh was in flight, and
+    /// the caller has nothing left to write to.
+    async fn renew(&self, token: &SessionToken, tokens: &TokenSet) -> SessionResult<()>;
+
     /// Revokes a session. Absent is success: logging out twice is not an error.
     async fn end(&self, token: &SessionToken) -> SessionResult<()>;
+}
+
+pub type CredentialResult<T> = Result<T, CredentialError>;
+
+/// What can go wrong while producing a usable Railway credential.
+#[derive(Debug, thiserror::Error)]
+pub enum CredentialError {
+    /// The access token is spent and there is nothing left to renew it with —
+    /// no refresh token was issued, or the one that was is no longer honoured.
+    /// Only a new login fixes it.
+    #[error("this login can no longer act on Railway; sign in again")]
+    Spent,
+
+    #[error(transparent)]
+    Provider(#[from] AuthError),
+
+    #[error(transparent)]
+    Store(#[from] SessionError),
+}
+
+impl From<CredentialError> for ApiError {
+    fn from(error: CredentialError) -> Self {
+        match error {
+            // A `401` and not a `403`: nothing about the request was wrong, and
+            // starting a new login is what fixes it.
+            CredentialError::Spent => Self::Unauthorized,
+            CredentialError::Provider(source) => source.into(),
+            CredentialError::Store(source) => source.into(),
+        }
+    }
+}
+
+/// The Railway credential behind a session, kept usable.
+///
+/// A session lasts two weeks and the access token it was opened with lasts
+/// about an hour, so something has to renew the second without ending the
+/// first. That needs both the store that holds the tokens and the provider that
+/// reissues them, which is why it composes the two rather than living on
+/// either: neither knows about the other, and it would be the wrong dependency
+/// in both directions.
+pub struct Credentials<'a> {
+    sessions: &'a dyn SessionStore,
+    auth: &'a dyn AuthProvider,
+}
+
+impl<'a> Credentials<'a> {
+    #[must_use]
+    pub fn new(sessions: &'a dyn SessionStore, auth: &'a dyn AuthProvider) -> Self {
+        Self { sessions, auth }
+    }
+
+    /// The session's access token, renewed and written back first if it is
+    /// spent.
+    ///
+    /// Renewal is per-request and unsynchronised: two requests arriving on the
+    /// same expired session both refresh, and the second write wins. Both
+    /// tokens work, so the cost is a wasted call rather than a broken session.
+    pub async fn access_token(
+        &self,
+        token: &SessionToken,
+        session: Session,
+    ) -> CredentialResult<Secret> {
+        let skew =
+            TimeDelta::try_seconds(ACCESS_TOKEN_EXPIRY_SKEW_SECS).unwrap_or_else(TimeDelta::zero);
+
+        if !session.tokens.is_expired_at(Utc::now() + skew) {
+            return Ok(session.tokens.access_token);
+        }
+
+        let previous = session.tokens;
+        let refresh_token = previous
+            .refresh_token
+            .as_ref()
+            .ok_or(CredentialError::Spent)?;
+
+        let mut renewed = match self.auth.refresh(refresh_token).await {
+            Ok(renewed) => renewed,
+            // A grant the provider has stopped honouring is the user's cue to
+            // log in again, not a bad request from the browser that asked.
+            Err(AuthError::InvalidGrant) => return Err(CredentialError::Spent),
+            Err(error) => return Err(error.into()),
+        };
+
+        // Rotation is optional: a provider that returns no new refresh token
+        // means the old one still stands, and overwriting it with nothing would
+        // end the session at the next expiry.
+        if renewed.refresh_token.is_none() {
+            renewed.refresh_token = previous.refresh_token;
+        }
+
+        self.sessions.renew(token, &renewed).await?;
+        tracing::debug!(user_id = %session.user.id, "renewed a Railway access token");
+
+        Ok(renewed.access_token)
+    }
 }
 
 /// [`SessionStore`] over the application's Postgres pool.
@@ -262,6 +366,22 @@ impl SessionStore for PgSessionStore {
                 }
             },
         ))
+    }
+
+    async fn renew(&self, token: &SessionToken, tokens: &TokenSet) -> SessionResult<()> {
+        let mut conn = self.database.conn().await?;
+
+        diesel::update(sessions::table.filter(sessions::token_hash.eq(token.digest())))
+            .set((
+                sessions::access_token.eq(tokens.access_token.expose()),
+                sessions::refresh_token.eq(tokens.refresh_token.as_ref().map(Secret::expose)),
+                sessions::scope.eq(&tokens.scope),
+                sessions::access_token_expires_at.eq(tokens.expires_at),
+            ))
+            .execute(&mut conn)
+            .await?;
+
+        Ok(())
     }
 
     async fn end(&self, token: &SessionToken) -> SessionResult<()> {

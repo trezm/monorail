@@ -7,8 +7,9 @@ bazel run //ui:dev     # http://localhost:4321
 bazel build //ui       # static site into bazel-bin/ui/dist
 ```
 
-One page so far — a Login with Railway button, and an account bar for whoever
-is signed in.
+One page: a Login with Railway button, or — once there is a session — an
+account bar and the Railway projects on that account, each expanding to the
+services inside it.
 
 ## Layout
 
@@ -18,7 +19,9 @@ is signed in.
 | `src/components/App.tsx` | The one island, hydrated with `client:load`. |
 | `src/components/LoginButton.tsx` | The button. |
 | `src/components/UserMenu.tsx` | Name, avatar and log out, top right. |
+| `src/components/ProjectList.tsx` | The projects, and their services. |
 | `src/lib/session.tsx` | The session context, provider and hook. |
+| `src/lib/projects.ts` | `GET /api/v1/projects`, and the types it returns. |
 | `src/styles/global.css` | Everything visual. No framework. |
 | `astro.config.mjs` | React integration, and the output paths Bazel overrides. |
 
@@ -27,6 +30,12 @@ has to be a top-level navigation, so `fetch` cannot start one, and a real link
 keeps middle-click, keyboard activation and the status bar working. It is a
 React component anyway because the redirect takes a moment and the click needs
 acknowledging.
+
+A project is a native `<details>`, not a hand-rolled disclosure: it is keyboard
+operable, announced as expandable, and findable by the browser's own in-page
+search before any of this code runs. `open` is controlled from React so an
+account with a single project can start expanded without the component and the
+DOM disagreeing about the attribute afterwards.
 
 ## The session
 
@@ -38,21 +47,26 @@ in, not an error.
 
 That answer decides what renders. `session.isSignedIn()` and
 `session.isSignedOut()` are not each other's negation — until the request
-answers, both are false — so the account bar and the login button each wait for
-their own answer instead of one of them showing to the wrong person.
+answers, both are false — so the account bar, the login button and the projects
+each wait for their own answer instead of one of them showing to the wrong
+person.
 
 React context does not cross Astro island boundaries, so everything that reads
 the session lives under a single `client:load` island rather than one per
 component. That is what `App.tsx` is for, and it is why logging out needs no
 page reload: `DELETE /auth/session` clears the `HttpOnly` cookie server-side —
-nothing else can — and the provider then tells both components at once.
+nothing else can — and the provider then tells every component at once.
+
+A `401` from `GET /api/v1/projects` means something else: the cookie is still
+good and the Railway token behind it is spent. Nothing in the browser can renew
+it, so `ProjectList` ends the session through the provider, which puts the login
+button back.
 
 ## Configuration
 
-`PUBLIC_API_URL` is where the login button points. `PUBLIC_` is Astro's prefix
-for values that reach the browser, which this one must: the button is a link to
-the API, so the URL is baked into the page at build time rather than read at
-runtime.
+`PUBLIC_API_URL` is where the API lives. `PUBLIC_` is Astro's prefix for values
+that reach the browser, which this one must: every request is made from the
+page, so the URL is baked in at build time rather than read at runtime.
 
 How it is supplied depends on how you build:
 
@@ -72,14 +86,15 @@ absent from the sandbox, so Astro never sees it; that is why the release config
 has no default rather than a localhost one, which would otherwise ship a
 deployed site pointing at the visitor's own machine.
 
-The API needs to allow this origin to send its session cookie:
+The API needs to allow this origin to send its session cookie, or every call
+above the login fails:
 
 ```bash
 API_CORS_ALLOWED_ORIGINS=http://localhost:4321
 ```
 
 A wildcard will not do — the CORS specification forbids pairing credentials with
-one.
+one. [`../api/.env.example`](../api/.env.example) already carries this value.
 
 ## Dependencies
 

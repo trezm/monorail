@@ -1,4 +1,5 @@
-//! Environment variable names and their defaults.
+//! Environment variable names and their defaults, and the fixed values that go
+//! alongside them — the ones with no defensible reason to be configurable.
 
 pub const ENV: &str = "API_ENV";
 pub const HOST: &str = "API_HOST";
@@ -49,6 +50,15 @@ pub const DEFAULT_RAILWAY_SCOPES: &str = "openid email profile project:member wo
 /// The scope `OpenID` Connect requires, and without which the flow returns no
 /// identity at all.
 pub const REQUIRED_RAILWAY_SCOPE: &str = "openid";
+
+/// Railway's public GraphQL API, relative to the issuer. Not configurable
+/// separately: a token minted against one host is worthless against another.
+pub const RAILWAY_GRAPHQL_PATH: &str = "graphql/v2";
+
+/// How much of an access token's remaining life is too little to start a
+/// request with. Renewing a token that would expire mid-flight costs one extra
+/// call and saves the user a `401` they would read as a spurious logout.
+pub const ACCESS_TOKEN_EXPIRY_SKEW_SECS: i64 = 60;
 
 pub const DEFAULT_RAILWAY_TIMEOUT_SECS: u64 = 10;
 
