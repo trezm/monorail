@@ -22,7 +22,7 @@ use monorail_api::{
     routes::auth::{PENDING_COOKIE, SESSION_COOKIE},
     services::{
         auth::{AuthError, AuthProvider, AuthResult, CsrfState, Pkce, RailwayIdentity, TokenSet},
-        railway::{Project, RailwayApi, RailwayResult, Service},
+        railway::{Project, RailwayApi, RailwayError, RailwayResult, Service, ServiceSource},
         session::{Session, SessionResult, SessionStore, SessionToken, User},
     },
 };
@@ -110,6 +110,21 @@ fn get_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
         .uri(uri)
         .header(header::COOKIE, cookie)
         .body(Body::empty())
+        .expect("bad request")
+}
+
+fn post_json(uri: &str, cookie: Option<&str>, body: &Value) -> Request<Body> {
+    let mut builder = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .header(header::CONTENT_TYPE, "application/json");
+
+    if let Some(cookie) = cookie {
+        builder = builder.header(header::COOKIE, cookie);
+    }
+
+    builder
+        .body(Body::from(body.to_string()))
         .expect("bad request")
 }
 
@@ -265,11 +280,20 @@ impl SessionStore for MemorySessions {
 #[derive(Default)]
 struct StubRailway {
     seen: Mutex<Vec<String>>,
+    created: Mutex<Vec<(String, ServiceSource)>>,
 }
 
 impl StubRailway {
+    /// The one project id creation declines, the way Railway declines a
+    /// project the login cannot see.
+    const REJECTED_PROJECT: &'static str = "project-forbidden";
+
     fn last_token(&self) -> Option<String> {
         self.seen.lock().expect("lock").last().cloned()
+    }
+
+    fn last_created(&self) -> Option<(String, ServiceSource)> {
+        self.created.lock().expect("lock").last().cloned()
     }
 }
 
@@ -308,6 +332,33 @@ impl RailwayApi for StubRailway {
                 services: Vec::new(),
             },
         ])
+    }
+
+    async fn create_service(
+        &self,
+        access_token: &Secret,
+        project_id: &str,
+        source: &ServiceSource,
+    ) -> RailwayResult<Service> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push(access_token.expose().to_owned());
+
+        if project_id == Self::REJECTED_PROJECT {
+            return Err(RailwayError::Rejected("Project not found".to_owned()));
+        }
+
+        self.created
+            .lock()
+            .expect("lock")
+            .push((project_id.to_owned(), source.clone()));
+
+        Ok(Service {
+            id: "service-new".to_owned(),
+            name: "shiny-new-service".to_owned(),
+            created_at: None,
+        })
     }
 }
 
@@ -633,6 +684,141 @@ async fn a_logged_in_browser_reads_its_projects_and_their_services() {
         Some("access-stub"),
         "the session's own token should reach Railway"
     );
+}
+
+#[tokio::test]
+async fn creating_a_service_requires_a_session() {
+    let (app, _) = app_with_login();
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/projects/project-1/services",
+            None,
+            &serde_json::json!({ "source": { "docker_image": "nginx:latest" } }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "unauthorized");
+}
+
+#[tokio::test]
+async fn a_service_is_created_from_a_docker_image() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/projects/project-1/services",
+            Some(&session_cookie),
+            &serde_json::json!({ "source": { "docker_image": "nginx:latest" } }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["id"], "service-new");
+    assert_eq!(body["name"], "shiny-new-service");
+
+    assert_eq!(
+        railway.last_created(),
+        Some((
+            "project-1".to_owned(),
+            ServiceSource::DockerImage("nginx:latest".to_owned())
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_service_is_created_from_a_github_repo() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/v1/projects/project-1/services",
+            Some(&session_cookie),
+            &serde_json::json!({ "source": { "github_repo": "railwayapp/starters" } }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(
+        railway.last_created(),
+        Some((
+            "project-1".to_owned(),
+            ServiceSource::GithubRepo("railwayapp/starters".to_owned())
+        ))
+    );
+}
+
+#[tokio::test]
+async fn a_blank_source_never_reaches_railway() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/projects/project-1/services",
+            Some(&session_cookie),
+            &serde_json::json!({ "source": { "docker_image": "   " } }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "unprocessable_entity");
+    assert_eq!(body["error"]["message"], "docker_image must not be empty");
+    assert_eq!(railway.last_created(), None);
+}
+
+/// Only the two supported sources deserialize; anything else is caught by the
+/// extractor and answers on the standard envelope.
+#[tokio::test]
+async fn an_unsupported_source_kind_is_rejected() {
+    let (app, _, railway) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/projects/project-1/services",
+            Some(&session_cookie),
+            &serde_json::json!({ "source": { "helm_chart": "bitnami/nginx" } }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "unprocessable_entity");
+    assert_eq!(railway.last_created(), None);
+}
+
+/// Railway declining the mutation is the caller's problem to fix, and its
+/// message survives the trip — not a `503` pretending the provider is down.
+#[tokio::test]
+async fn railways_rejection_reaches_the_caller() {
+    let (app, _, _) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/projects/project-forbidden/services",
+            Some(&session_cookie),
+            &serde_json::json!({ "source": { "docker_image": "nginx:latest" } }),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["message"], "Project not found");
 }
 
 /// A session outlives the access token it was opened with, so a stale one is
