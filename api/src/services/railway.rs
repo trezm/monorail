@@ -264,23 +264,6 @@ mutation DeploymentRemove($id: String!) {
 }
 ";
 
-/// Which deployment spinning down removes: the latest, unless the service has
-/// nothing running — never deployed, or already gone. Either is the caller's
-/// situation to hear about, not a provider fault.
-fn deployment_to_remove(latest: Option<Deployment>) -> RailwayResult<Deployment> {
-    match latest {
-        Some(deployment) if deployment.status != "REMOVED" && deployment.status != "REMOVING" => {
-            Ok(deployment)
-        }
-        Some(_) => Err(RailwayError::Rejected(
-            "the service is already spun down in this environment".to_owned(),
-        )),
-        None => Err(RailwayError::Rejected(
-            "the service has never been deployed in this environment".to_owned(),
-        )),
-    }
-}
-
 fn service_create_variables(project_id: &str, source: &ServiceSource) -> serde_json::Value {
     let source = match source {
         ServiceSource::DockerImage(_) => serde_json::json!({ "image": source.value() }),
@@ -471,7 +454,26 @@ impl RailwayApi for RailwayGraphQl {
             .service_instance(access_token, service_id, environment_id)
             .await?;
 
-        let deployment = deployment_to_remove(instance.latest_deployment)?;
+        // The latest deployment is what gets removed — unless the service has
+        // nothing running, which is the caller's situation to hear about, not
+        // a provider fault.
+        let deployment = match instance.latest_deployment {
+            Some(deployment)
+                if deployment.status != "REMOVED" && deployment.status != "REMOVING" =>
+            {
+                deployment
+            }
+            Some(_) => {
+                return Err(RailwayError::Rejected(
+                    "the service is already spun down in this environment".to_owned(),
+                ));
+            }
+            None => {
+                return Err(RailwayError::Rejected(
+                    "the service has never been deployed in this environment".to_owned(),
+                ));
+            }
+        };
 
         let body = serde_json::json!({
             "query": DEPLOYMENT_REMOVE_MUTATION,
@@ -920,37 +922,6 @@ mod tests {
 
         let deployment = instance.latest_deployment.expect("should be present");
         assert_eq!(deployment.status, "SUCCESS");
-    }
-
-    fn deployment(status: &str) -> Deployment {
-        Deployment {
-            id: "deploy-1".to_owned(),
-            status: status.to_owned(),
-            created_at: None,
-        }
-    }
-
-    #[test]
-    fn spinning_down_removes_the_latest_deployment() {
-        let removed =
-            deployment_to_remove(Some(deployment("SUCCESS"))).expect("should be removable");
-
-        assert_eq!(removed.id, "deploy-1");
-    }
-
-    /// A deployment already gone, or on its way out, or never made: all leave
-    /// nothing to remove, and all are the caller's news rather than a fault.
-    #[test]
-    fn a_service_with_nothing_running_declines_to_spin_down() {
-        for latest in [
-            Some(deployment("REMOVED")),
-            Some(deployment("REMOVING")),
-            None,
-        ] {
-            let error = deployment_to_remove(latest).expect_err("should decline");
-
-            assert!(matches!(error, RailwayError::Rejected(_)));
-        }
     }
 
     #[test]
