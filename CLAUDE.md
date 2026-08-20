@@ -88,9 +88,15 @@ and need no repin: `rules_js` reads `pnpm-lock.yaml` directly.
 - Config is `API_`-prefixed and every setting has a default; add new ones to
   `constants.rs`, `config.rs`, and `api/.env.example` together.
 - axum 0.8 path syntax is `/{id}`.
-- Unit tests live in `#[cfg(test)]` modules; end-to-end tests drive the real
-  router in-process in `api/tests/api.rs`. Prefer the latter for anything
-  touching HTTP.
+- Test doubles are mockall mocks — the service traits carry
+  `#[cfg_attr(test, mockall::automock)]`; never hand-roll a stub. Route
+  handlers are tested in their module's `#[cfg(test)]` block: configure the
+  mocks, assemble them via `api/src/testing.rs`, drive the module's `router()`
+  with `oneshot`. Auth requirements, validation and error mapping live there.
+  `api/tests/api.rs` keeps one happy-path test per endpoint plus what only the
+  assembled app shows (middleware, the fallback), declaring its own mocks with
+  `mockall::mock!` since `#[cfg(test)]` code is invisible to it; do not add
+  non-happy-path cases to it.
 - `unsafe_code` is forbidden; clippy runs at `pedantic`.
 - Browser-facing routes live outside `/api/v1`, like `health`; JSON the UI
   calls is versioned. `CurrentUser` in `extract.rs` is what requires a login.

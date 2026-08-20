@@ -17,6 +17,9 @@ pub mod shutdown;
 pub mod state;
 pub mod telemetry;
 
+#[cfg(test)]
+mod testing;
+
 use std::{iter::once, net::SocketAddr, time::Duration};
 
 use anyhow::Context as _;

@@ -65,3 +65,23 @@ async fn ready(state: axum::extract::State<AppState>) -> ApiResult<Json<Health>>
         uptime_seconds: state.uptime().as_secs(),
     }))
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::testing;
+
+    /// Readiness round-trips a real query, so with no database it must fail —
+    /// and fail as a `503` on the standard envelope rather than a `500` or a
+    /// panic.
+    #[tokio::test]
+    async fn readiness_reports_unavailable_without_a_database() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(&app, testing::get("/health/ready")).await;
+
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(body["error"]["code"], "service_unavailable");
+    }
+}

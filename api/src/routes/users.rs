@@ -40,3 +40,44 @@ impl From<User> for Profile {
 async fn me(CurrentUser(user): CurrentUser) -> Json<Profile> {
     Json(user.into())
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::{
+        routes::auth::SESSION_COOKIE,
+        services::{auth::MockAuthProvider, railway::MockRailwayApi, session::MockSessionStore},
+        testing,
+    };
+
+    #[tokio::test]
+    async fn the_profile_endpoint_requires_a_session() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(&app, testing::get("/users/me")).await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn an_unknown_session_cookie_is_not_a_login() {
+        let mut sessions = MockSessionStore::new();
+        sessions.expect_lookup().returning(|_| Ok(None));
+
+        let app = super::router().with_state(testing::state(
+            MockAuthProvider::new(),
+            sessions,
+            MockRailwayApi::new(),
+        ));
+
+        let (status, _) = testing::send(
+            &app,
+            testing::get_with_cookie("/users/me", &format!("{SESSION_COOKIE}=made-up")),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+}

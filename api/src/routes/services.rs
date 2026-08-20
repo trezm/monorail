@@ -63,3 +63,167 @@ async fn spin_down(
 
     Ok(StatusCode::NO_CONTENT)
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use crate::{
+        services::{
+            auth::MockAuthProvider,
+            railway::{MockRailwayApi, RailwayError},
+            session::MockSessionStore,
+        },
+        testing,
+    };
+
+    fn app_with_railway(railway: MockRailwayApi) -> (axum::Router, String) {
+        let mut sessions = MockSessionStore::new();
+        let cookie = testing::logged_in(&mut sessions, testing::fresh_tokens());
+        let app =
+            super::router().with_state(testing::state(MockAuthProvider::new(), sessions, railway));
+
+        (app, cookie)
+    }
+
+    #[tokio::test]
+    async fn the_instance_endpoint_requires_a_session() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get("/services/service-1/instance?environment=env-1"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn an_instance_request_without_an_environment_is_rejected() {
+        let mut railway = MockRailwayApi::new();
+        railway.expect_service_instance().never();
+        let (app, cookie) = app_with_railway(railway);
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get_with_cookie("/services/service-1/instance", &cookie),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn a_service_missing_from_an_environment_is_not_found() {
+        let mut railway = MockRailwayApi::new();
+        railway
+            .expect_service_instance()
+            .withf(|_, service_id, environment_id| {
+                service_id == "service-1" && environment_id == "env-empty"
+            })
+            .returning(|_, service_id, environment_id| {
+                Err(RailwayError::NotFound(format!(
+                    "service `{service_id}` has no instance in `{environment_id}`"
+                )))
+            });
+        let (app, cookie) = app_with_railway(railway);
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get_with_cookie(
+                "/services/service-1/instance?environment=env-empty",
+                &cookie,
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+    }
+
+    #[tokio::test]
+    async fn the_spin_down_endpoint_requires_a_session() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_empty("/services/service-1/spin-down?environment=env-1", None),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+        assert_eq!(body["error"]["code"], "unauthorized");
+    }
+
+    #[tokio::test]
+    async fn a_spin_down_without_an_environment_is_rejected() {
+        let mut railway = MockRailwayApi::new();
+        railway.expect_spin_down().never();
+        let (app, cookie) = app_with_railway(railway);
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_empty("/services/service-1/spin-down", Some(&cookie)),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn spinning_down_a_service_missing_from_an_environment_is_not_found() {
+        let mut railway = MockRailwayApi::new();
+        railway
+            .expect_spin_down()
+            .returning(|_, service_id, environment_id| {
+                Err(RailwayError::NotFound(format!(
+                    "service `{service_id}` has no instance in `{environment_id}`"
+                )))
+            });
+        let (app, cookie) = app_with_railway(railway);
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_empty(
+                "/services/service-1/spin-down?environment=env-empty",
+                Some(&cookie),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert_eq!(body["error"]["code"], "not_found");
+    }
+
+    /// Nothing running is the caller's situation, answered with Railway's own
+    /// message — not a `503` pretending the provider is down.
+    #[tokio::test]
+    async fn spinning_down_a_parked_service_is_rejected() {
+        let mut railway = MockRailwayApi::new();
+        railway.expect_spin_down().returning(|_, _, _| {
+            Err(RailwayError::Rejected(
+                "the service is already spun down in this environment".to_owned(),
+            ))
+        });
+        let (app, cookie) = app_with_railway(railway);
+
+        let (status, body) = testing::send(
+            &app,
+            testing::post_empty(
+                "/services/service-parked/spin-down?environment=env-1",
+                Some(&cookie),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(
+            body["error"]["message"],
+            "the service is already spun down in this environment"
+        );
+    }
+}

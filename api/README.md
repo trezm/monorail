@@ -29,13 +29,40 @@ The service requires Postgres and refuses to start without it. See
 | `src/secret.rs` | A wrapper that keeps a string out of logs. |
 | `src/routes/` | HTTP handlers, one module per resource. |
 | `src/services/` | Business logic, one trait per capability. |
+| `src/testing.rs` | Fixtures and mock assembly for route-handler unit tests. |
 | `migrations/` | Schema history, embedded into the binary. |
 | `diesel.toml` | Read by diesel-cli only. |
-| `tests/api.rs` | End-to-end tests against the real router. |
+| `tests/api.rs` | End-to-end happy paths against the real router. |
 
-The application lives in a library, not the binary, so `tests/api.rs` builds the
-real `Router` and drives it in-process with `tower::ServiceExt::oneshot` — no
-port binding, no flakiness, full middleware coverage.
+## Testing
+
+Test doubles come from [mockall](https://docs.rs/mockall). Each service trait
+carries `#[cfg_attr(test, mockall::automock)]`, so `MockAuthProvider`,
+`MockRailwayApi` and `MockSessionStore` are generated next to the traits. A
+mock answers only what a test expects of it — an unexpected call panics and
+fails the test, which is how "never reaches Railway" is asserted (`.never()`,
+or no expectation at all). Never hand-roll a stub.
+
+Route handlers are unit tested in their own module: a `#[cfg(test)]` block
+configures the mocks, assembles them into an `AppState` with
+[`src/testing.rs`](src/testing.rs), and drives the module's `router()` with
+`tower::ServiceExt::oneshot`. No middleware, no network, no Postgres. Auth
+requirements, validation and error mapping are covered here, and a new
+non-happy-path case belongs here.
+
+The application lives in a library, not the binary, so `tests/api.rs` can
+build the real `Router` and drive it in-process the same way — no port
+binding, full middleware coverage. It holds one happy-path test per endpoint
+and the behaviour only the assembled application shows: middleware, the
+fallback. It declares its own mocks with `mockall::mock!`, because an external
+test crate compiles the library without `cfg(test)` and cannot see the
+generated ones; its session mock closes over a shared map, since the login
+flows need state that survives across requests. A case that only needs the
+handler is a unit test, not another end-to-end test.
+
+Services keep their `#[cfg(test)]` tests beside the code. The one test that
+needs Postgres, in [`src/services/session.rs`](src/services/session.rs), is
+`#[ignore]`d and documents its own setup.
 
 ## Conventions
 
@@ -198,7 +225,7 @@ redirect carrying an error code is the obvious follow-up.
 
 [`src/services/session.rs`](src/services/session.rs) owns them.
 `SessionStore` is the capability, `PgSessionStore` the Postgres implementation,
-and the trait is what lets the route tests run with a `HashMap` and no database.
+and the trait is what lets the route tests run with a mock and no database.
 
 The cookie holds an opaque token; the `sessions` row holds only its SHA-256
 digest, so a dump of that table yields no usable session. The digest is
@@ -223,7 +250,7 @@ the account; take it unless the handler needs the Railway tokens too.
 Logging in with Railway is only the means; acting on Railway afterwards is the
 point. [`src/services/railway.rs`](src/services/railway.rs) is that half:
 `RailwayApi` is the capability, `RailwayGraphQl` talks to
-`{issuer}/graphql/v2`, and the same trait-plus-stub arrangement keeps the route
+`{issuer}/graphql/v2`, and the same trait-plus-mock arrangement keeps the route
 tests off the network.
 
 `GET /api/v1/projects` returns the caller's projects with their services nested

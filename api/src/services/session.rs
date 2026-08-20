@@ -120,7 +120,8 @@ pub struct Session {
 ///
 /// A trait for the same reason [`ContainerManager`](super::container::ContainerManager)
 /// is one — handlers depend on the behaviour, not on Postgres — and because it
-/// is what lets the route tests run without a database.
+/// is what lets the route tests run with `MockSessionStore` and no database.
+#[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 pub trait SessionStore: Send + Sync + 'static {
     /// Records the identity behind a completed login and opens a session for

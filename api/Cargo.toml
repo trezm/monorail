@@ -48,6 +48,7 @@ uuid = { workspace = true }
 
 [dev-dependencies]
 http-body-util = { workspace = true }
+mockall = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }
 tower = { workspace = true }
 

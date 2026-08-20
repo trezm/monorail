@@ -151,7 +151,8 @@ impl ServiceSource {
 ///
 /// A trait for the same reason [`AuthProvider`](super::auth::AuthProvider) is
 /// one — handlers depend on the behaviour, not on GraphQL — and because it is
-/// what lets the route tests answer without a network.
+/// what lets the route tests answer with `MockRailwayApi` and no network.
+#[cfg_attr(test, mockall::automock)]
 #[async_trait::async_trait]
 pub trait RailwayApi: Send + Sync + 'static {
     /// Every project the login granted access to, each carrying its services.

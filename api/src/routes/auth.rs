@@ -213,3 +213,100 @@ fn harden(
 
     cookie
 }
+
+#[cfg(test)]
+mod tests {
+    use axum::http::StatusCode;
+
+    use super::PENDING_COOKIE;
+    use crate::{
+        config::Environment,
+        services::{auth::MockAuthProvider, railway::MockRailwayApi, session::MockSessionStore},
+        testing,
+    };
+
+    /// Reproduces what the login handler set, so the callback can be driven
+    /// directly without following a redirect through a real provider.
+    fn pending_cookie(state: &str, verifier: &str) -> String {
+        format!("{PENDING_COOKIE}={state}.{verifier}")
+    }
+
+    #[tokio::test]
+    async fn a_callback_without_the_pending_cookie_is_rejected() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get("/auth/railway/callback?code=code-ok&state=whatever"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn a_callback_whose_state_does_not_match_is_rejected() {
+        let mut auth = MockAuthProvider::new();
+        auth.expect_exchange_code().never();
+
+        let mut sessions = MockSessionStore::new();
+        sessions.expect_begin().never();
+
+        let app = super::router().with_state(testing::state(auth, sessions, MockRailwayApi::new()));
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get_with_cookie(
+                "/auth/railway/callback?code=code-ok&state=attacker",
+                &pending_cookie("issued", "verifier"),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "bad_request");
+    }
+
+    #[tokio::test]
+    async fn a_declined_consent_screen_is_not_reported_as_an_outage() {
+        let app = super::router().with_state(testing::untouched_state());
+
+        let (status, body) = testing::send(
+            &app,
+            testing::get_with_cookie(
+                "/auth/railway/callback?error=access_denied&error_description=user%20said%20no",
+                &pending_cookie("issued", "verifier"),
+            ),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(body["error"]["code"], "forbidden");
+    }
+
+    /// Development runs over plain http, so `Secure` would stop the cookie
+    /// being sent at all. Anywhere else it must be there.
+    #[tokio::test]
+    async fn the_session_cookie_is_secure_outside_development() {
+        let mut auth = MockAuthProvider::new();
+        auth.expect_authorize_url()
+            .returning(|_, _| "https://provider.test/oauth/auth".to_owned());
+
+        let mut config = testing::config();
+        config.environment = Environment::Production;
+
+        let app = super::router().with_state(testing::state_with_config(
+            config,
+            auth,
+            MockSessionStore::new(),
+            MockRailwayApi::new(),
+        ));
+
+        let response = testing::raw(&app, testing::get("/auth/railway")).await;
+        let cookie = testing::set_cookie_named(&response, PENDING_COOKIE)
+            .expect("pending cookie should be set");
+
+        assert!(cookie.contains("Secure"), "got {cookie}");
+    }
+}
