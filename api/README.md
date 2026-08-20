@@ -231,14 +231,19 @@ inside, because one GraphQL query returns exactly that and asking twice would be
 two round trips for a shape the server already assembles.
 
 **Token renewal.** A session lasts two weeks and the access token it was opened
-with lasts about an hour, so [`src/routes/projects.rs`](src/routes/projects.rs)
-renews a spent token against the refresh token and writes the result back
-through `SessionStore::renew` before it calls Railway. A provider that returns
-no new refresh token has not revoked the old one, so the old one is kept — the
-alternative ends the session at the next expiry. A login that never got a
-refresh token, or one the provider has stopped honouring, is a `401`, which is
-what sends the browser back through a login rather than a `400` it can do
-nothing with.
+with lasts about an hour, so something has to renew the second without ending
+the first. `Credentials` in
+[`src/services/session.rs`](src/services/session.rs) is that something:
+`state.credentials().access_token(..)` hands back a token that is good now,
+refreshing and writing back through `SessionStore::renew` when it is not. It
+composes the store and the auth provider rather than living on either — neither
+knows about the other, and it would be the wrong dependency in both directions.
+
+A provider that returns no new refresh token has not revoked the old one, so the
+old one is kept; the alternative ends the session at the next expiry. A login
+that never got a refresh token, or one the provider has stopped honouring, is
+`CredentialError::Spent` and reaches the client as a `401`, which sends the
+browser back through a login rather than a `400` it can do nothing with.
 
 Renewal is per-request and unsynchronised: two requests arriving on the same
 expired session both refresh, and the second write wins. Both tokens work, so

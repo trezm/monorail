@@ -18,7 +18,7 @@ use crate::{
     services::{
         auth::AuthProvider,
         railway::RailwayApi,
-        session::{PgSessionStore, SessionStore},
+        session::{Credentials, PgSessionStore, SessionStore},
     },
 };
 
@@ -89,6 +89,14 @@ impl AppState {
     #[must_use]
     pub fn railway(&self) -> &dyn RailwayApi {
         self.railway.as_ref()
+    }
+
+    /// The Railway credential behind a session, renewed on demand. Borrows both
+    /// halves rather than storing a third handle: it is a pairing of two things
+    /// the state already owns.
+    #[must_use]
+    pub fn credentials(&self) -> Credentials<'_> {
+        Credentials::new(self.sessions(), self.auth())
     }
 
     #[must_use]
