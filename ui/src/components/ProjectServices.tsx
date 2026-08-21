@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 
+import AutoscalingRules from './AutoscalingRules';
 import {
   environments as fetchEnvironments,
   RequestRejected,
@@ -164,6 +165,7 @@ export default function ProjectServices({ project, active }: { project: Project;
                       onSpunUp={() => setEpoch((count) => count + 1)}
                     />
                   )}
+                  <AutoscalingRules serviceId={service.id} environmentId={selected} />
                 </>
               )}
             </li>

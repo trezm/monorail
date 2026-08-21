@@ -205,6 +205,11 @@ pub struct Config {
     pub session_ttl: Duration,
     /// Where a completed login sends the browser.
     pub auth_success_redirect: String,
+    /// Whether this process runs the autoscaling loop. Off is for running the
+    /// loop as its own service, or not at all.
+    pub autoscaler_enabled: bool,
+    /// How often the autoscaling loop looks for due rules.
+    pub autoscaler_tick: Duration,
 }
 
 /// Everything a login against Railway needs.
@@ -287,6 +292,14 @@ impl Config {
                 constants::AUTH_SUCCESS_REDIRECT,
                 constants::DEFAULT_AUTH_SUCCESS_REDIRECT.to_owned(),
             )?,
+            autoscaler_enabled: parsed(
+                constants::AUTOSCALER_ENABLED,
+                constants::DEFAULT_AUTOSCALER_ENABLED,
+            )?,
+            autoscaler_tick: Duration::from_secs(parsed(
+                constants::AUTOSCALER_TICK_SECS,
+                constants::DEFAULT_AUTOSCALER_TICK_SECS,
+            )?),
         })
     }
 }

@@ -17,6 +17,7 @@ use crate::{
     db::Database,
     services::{
         auth::AuthProvider,
+        autoscaling::{AutoscaleStore, PgAutoscaleStore},
         railway::RailwayApi,
         session::{Credentials, PgSessionStore, SessionStore},
     },
@@ -29,6 +30,7 @@ pub struct AppState {
     auth: Arc<dyn AuthProvider>,
     railway: Arc<dyn RailwayApi>,
     sessions: Arc<dyn SessionStore>,
+    autoscaling: Arc<dyn AutoscaleStore>,
     started_at: Instant,
 }
 
@@ -47,6 +49,7 @@ impl AppState {
         let ttl = TimeDelta::from_std(config.session_ttl)
             .unwrap_or_else(|_| TimeDelta::try_days(14).unwrap_or_default());
         let sessions = Arc::new(PgSessionStore::new(database.clone(), ttl));
+        let autoscaling = Arc::new(PgAutoscaleStore::new(database.clone()));
 
         Self {
             config: Arc::new(config),
@@ -54,6 +57,7 @@ impl AppState {
             auth,
             railway,
             sessions,
+            autoscaling,
             started_at: Instant::now(),
         }
     }
@@ -79,6 +83,33 @@ impl AppState {
     #[must_use]
     pub fn sessions(&self) -> &dyn SessionStore {
         self.sessions.as_ref()
+    }
+
+    /// The store as an owned handle, for the autoscaling loop — a task with
+    /// its own lifetime cannot borrow from the state.
+    #[must_use]
+    pub fn sessions_handle(&self) -> Arc<dyn SessionStore> {
+        self.sessions.clone()
+    }
+
+    /// Swaps in a different rule store, for a test that needs one that is not
+    /// Postgres.
+    #[must_use]
+    pub fn with_autoscaling(mut self, autoscaling: Arc<dyn AutoscaleStore>) -> Self {
+        self.autoscaling = autoscaling;
+        self
+    }
+
+    #[must_use]
+    pub fn autoscaling(&self) -> &dyn AutoscaleStore {
+        self.autoscaling.as_ref()
+    }
+
+    /// The store as an owned handle, for the autoscaling loop — a task with
+    /// its own lifetime cannot borrow from the state.
+    #[must_use]
+    pub fn autoscaling_handle(&self) -> Arc<dyn AutoscaleStore> {
+        self.autoscaling.clone()
     }
 
     #[must_use]

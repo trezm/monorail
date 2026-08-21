@@ -31,5 +31,23 @@ diesel::table! {
     }
 }
 
+diesel::table! {
+    horizontal_autoscaling (service_id) {
+        service_id -> Text,
+        metric -> Text,
+        user_id -> Uuid,
+        environment_id -> Text,
+        min_threshold -> Float8,
+        max_threshold -> Float8,
+        min_count -> Int4,
+        max_count -> Int4,
+        poll_frequency_secs -> Int4,
+        last_checked -> Nullable<Timestamptz>,
+        created_at -> Timestamptz,
+        updated_at -> Timestamptz,
+    }
+}
+
 diesel::joinable!(sessions -> users (user_id));
-diesel::allow_tables_to_appear_in_same_query!(sessions, users);
+diesel::joinable!(horizontal_autoscaling -> users (user_id));
+diesel::allow_tables_to_appear_in_same_query!(horizontal_autoscaling, sessions, users);

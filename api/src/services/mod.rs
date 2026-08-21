@@ -4,6 +4,7 @@
 //! depend on the behaviour rather than on a concrete backend.
 
 pub mod auth;
+pub mod autoscaling;
 pub mod container;
 pub mod jwks;
 pub mod railway;

@@ -15,6 +15,7 @@ use axum::{
     http::{Request, StatusCode, header},
     response::Response,
 };
+use chrono::{DateTime, Utc};
 use http_body_util::BodyExt as _;
 use monorail_api::{
     AppState, RailwayAuth, Secret,
@@ -22,15 +23,17 @@ use monorail_api::{
     routes::auth::{PENDING_COOKIE, SESSION_COOKIE},
     services::{
         auth::{AuthError, AuthProvider, AuthResult, CsrfState, Pkce, RailwayIdentity, TokenSet},
+        autoscaling::{AutoscaleError, AutoscaleResult, AutoscaleStore, NewRule, Rule},
         railway::{
-            Deployment, Environment as RailwayEnvironment, Project, RailwayApi, RailwayError,
-            RailwayResult, Service, ServiceInstance, ServiceSource,
+            Deployment, Environment as RailwayEnvironment, Measurement, MetricSample, Project,
+            RailwayApi, RailwayError, RailwayResult, Service, ServiceInstance, ServiceSource,
         },
-        session::{Session, SessionResult, SessionStore, SessionToken, User},
+        session::{Session, SessionCredentials, SessionResult, SessionStore, SessionToken, User},
     },
 };
 use serde_json::Value;
 use tower::ServiceExt as _;
+use uuid::Uuid;
 
 fn test_config() -> Config {
     Config {
@@ -51,6 +54,10 @@ fn test_config() -> Config {
         database_connect_timeout: std::time::Duration::from_millis(50),
         session_ttl: std::time::Duration::from_hours(1),
         auth_success_redirect: "http://localhost:4321/".to_owned(),
+        // The loop is only spawned by `run`, never by `app`; this documents
+        // that no test here runs it.
+        autoscaler_enabled: false,
+        autoscaler_tick: std::time::Duration::from_secs(30),
     }
 }
 
@@ -285,6 +292,14 @@ impl SessionStore for MemorySessions {
         self.rows.lock().expect("lock").remove(&token.digest());
         Ok(())
     }
+
+    async fn freshest_for_user(&self, _user_id: Uuid) -> SessionResult<Option<SessionCredentials>> {
+        unreachable!("only the autoscaling loop reads sessions by user, and no route test runs it")
+    }
+
+    async fn renew_by_id(&self, _session_id: Uuid, _tokens: &TokenSet) -> SessionResult<()> {
+        unreachable!("only the autoscaling loop renews by row id, and no route test runs it")
+    }
 }
 
 /// A [`RailwayApi`] that answers without a network, and remembers which access
@@ -446,6 +461,36 @@ impl RailwayApi for StubRailway {
         })
     }
 
+    async fn service_metrics(
+        &self,
+        access_token: &Secret,
+        _service_id: &str,
+        _measurement: Measurement,
+        _since: DateTime<Utc>,
+    ) -> RailwayResult<Vec<MetricSample>> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push(access_token.expose().to_owned());
+
+        Ok(Vec::new())
+    }
+
+    async fn set_replicas(
+        &self,
+        access_token: &Secret,
+        _service_id: &str,
+        _environment_id: &str,
+        _replicas: i64,
+    ) -> RailwayResult<()> {
+        self.seen
+            .lock()
+            .expect("lock")
+            .push(access_token.expose().to_owned());
+
+        Ok(())
+    }
+
     /// `env-empty` mirrors `service_instance`; `service-parked` is one whose
     /// latest deployment is already gone.
     async fn spin_down(
@@ -517,6 +562,75 @@ impl RailwayApi for StubRailway {
     }
 }
 
+/// An [`AutoscaleStore`] in a vec, so the rule endpoints need no Postgres.
+/// Only what the routes reach is real; the sweep half is unreachable because
+/// no test here runs the loop.
+#[derive(Default)]
+struct MemoryAutoscale {
+    rules: Mutex<Vec<Rule>>,
+}
+
+#[async_trait::async_trait]
+impl AutoscaleStore for MemoryAutoscale {
+    async fn create(&self, owner: Uuid, service_id: &str, rule: NewRule) -> AutoscaleResult<Rule> {
+        let mut rules = self.rules.lock().expect("lock");
+
+        if rules
+            .iter()
+            .any(|existing| existing.service_id == service_id)
+        {
+            return Err(AutoscaleError::Duplicate);
+        }
+
+        let row = Rule {
+            service_id: service_id.to_owned(),
+            metric: rule.metric,
+            user_id: owner,
+            environment_id: rule.environment_id,
+            min_threshold: rule.min_threshold,
+            max_threshold: rule.max_threshold,
+            min_count: rule.min_count,
+            max_count: rule.max_count,
+            poll_frequency_secs: rule.poll_frequency_secs,
+            last_checked: None,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        rules.push(row.clone());
+
+        Ok(row)
+    }
+
+    async fn list(&self, owner: Uuid, service_id: &str) -> AutoscaleResult<Vec<Rule>> {
+        Ok(self
+            .rules
+            .lock()
+            .expect("lock")
+            .iter()
+            .filter(|rule| rule.user_id == owner && rule.service_id == service_id)
+            .cloned()
+            .collect())
+    }
+
+    async fn remove(&self, owner: Uuid, service_id: &str) -> AutoscaleResult<bool> {
+        let mut rules = self.rules.lock().expect("lock");
+        let before = rules.len();
+
+        rules.retain(|rule| !(rule.service_id == service_id && rule.user_id == owner));
+
+        Ok(rules.len() < before)
+    }
+
+    async fn due(&self, _now: DateTime<Utc>) -> AutoscaleResult<Vec<Rule>> {
+        unreachable!("no route test runs the autoscaling loop")
+    }
+
+    async fn mark_checked(&self, _service_id: &str, _now: DateTime<Utc>) -> AutoscaleResult<()> {
+        unreachable!("no route test runs the autoscaling loop")
+    }
+}
+
 /// The router with a login that works, and sessions that do not need a database.
 fn app_with_login() -> (Router, Arc<MemorySessions>) {
     let (app, sessions, _) = app_with_railway();
@@ -530,7 +644,8 @@ fn app_with_railway() -> (Router, Arc<MemorySessions>, Arc<StubRailway>) {
     let sessions = Arc::new(MemorySessions::default());
     let railway = Arc::new(StubRailway::default());
     let state = AppState::new(test_config(), Arc::new(StubAuth), railway.clone())
-        .with_sessions(sessions.clone());
+        .with_sessions(sessions.clone())
+        .with_autoscaling(Arc::new(MemoryAutoscale::default()));
 
     (monorail_api::app(state), sessions, railway)
 }
@@ -1081,6 +1196,101 @@ async fn an_instance_request_without_an_environment_is_rejected() {
     assert_eq!(body["error"]["code"], "bad_request");
 }
 
+fn delete_with_cookie(uri: &str, cookie: &str) -> Request<Body> {
+    Request::builder()
+        .method("DELETE")
+        .uri(uri)
+        .header(header::COOKIE, cookie)
+        .body(Body::empty())
+        .expect("bad request")
+}
+
+fn rule_body() -> Value {
+    serde_json::json!({
+        "environment_id": "env-1",
+        "metric": "CPU",
+        "min_threshold": 0.2,
+        "max_threshold": 0.8,
+        "min_count": 1,
+        "max_count": 5,
+        "poll_frequency_secs": 60,
+    })
+}
+
+#[tokio::test]
+async fn the_autoscaling_endpoints_require_a_session() {
+    let (app, _, _) = app_with_railway();
+
+    let (status, _) = send(&app, get("/api/v1/services/service-1/autoscaling")).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    let (status, _) = send(
+        &app,
+        post_json("/api/v1/services/service-1/autoscaling", None, &rule_body()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn an_autoscaling_rule_round_trips() {
+    let (app, _, _) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, created) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &rule_body(),
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(created["metric"], "CPU");
+    assert_eq!(created["environment_id"], "env-1");
+    assert_eq!(created["min_threshold"], 0.2);
+    assert_eq!(created["max_threshold"], 0.8);
+    assert_eq!(created["min_count"], 1);
+    assert_eq!(created["max_count"], 5);
+    assert_eq!(created["poll_frequency_secs"], 60);
+    assert!(created["last_checked"].is_null());
+    assert!(
+        created.get("user_id").is_none(),
+        "the owner should not be on the wire"
+    );
+
+    let (status, body) = send(
+        &app,
+        get_with_cookie("/api/v1/services/service-1/autoscaling", &session_cookie),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["rules"][0]["metric"], "CPU");
+
+    // A service has at most one rule, so the collection path is its address.
+    let response = raw(
+        &app,
+        delete_with_cookie("/api/v1/services/service-1/autoscaling", &session_cookie),
+    )
+    .await;
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+
+    let (_, body) = send(
+        &app,
+        get_with_cookie("/api/v1/services/service-1/autoscaling", &session_cookie),
+    )
+    .await;
+    assert_eq!(
+        body["rules"]
+            .as_array()
+            .expect("rules should be a list")
+            .len(),
+        0
+    );
+}
+
 #[tokio::test]
 async fn the_spin_down_endpoint_requires_a_session() {
     let (app, _) = app_with_login();
@@ -1118,6 +1328,136 @@ async fn a_logged_in_browser_spins_a_service_down() {
         railway.last_spun_down(),
         Some(("service-1".to_owned(), "env-1".to_owned()))
     );
+}
+
+/// One rule per service: even a rule watching a different metric conflicts,
+/// because two rules steering the same replica count could fight.
+#[tokio::test]
+async fn a_second_rule_for_the_same_service_is_a_conflict() {
+    let (app, _, _) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &rule_body(),
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+
+    let mut other_metric = rule_body();
+    other_metric["metric"] = serde_json::json!("MEMORY");
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &other_metric,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(body["error"]["code"], "conflict");
+}
+
+#[tokio::test]
+async fn an_unusable_rule_is_rejected_with_the_reason() {
+    let (app, _, _) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let mut inverted = rule_body();
+    inverted["min_threshold"] = serde_json::json!(0.9);
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &inverted,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        body["error"]["message"],
+        "max_threshold must be greater than min_threshold"
+    );
+
+    let mut unpollable = rule_body();
+    unpollable["poll_frequency_secs"] = serde_json::json!(0);
+    let (status, _) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &unpollable,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+
+    let mut unknown_metric = rule_body();
+    unknown_metric["metric"] = serde_json::json!("DISK");
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &unknown_metric,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["code"], "unprocessable_entity");
+
+    let mut stoppable = rule_body();
+    stoppable["min_count"] = serde_json::json!(0);
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &stoppable,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["message"], "min_count must be at least 1");
+
+    let mut inverted_counts = rule_body();
+    inverted_counts["min_count"] = serde_json::json!(4);
+    inverted_counts["max_count"] = serde_json::json!(2);
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &inverted_counts,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        body["error"]["message"],
+        "max_count must be at least min_count"
+    );
+}
+
+#[tokio::test]
+async fn removing_an_unknown_rule_is_not_found() {
+    let (app, _, _) = app_with_railway();
+    let session_cookie = log_in(&app).await;
+
+    let (status, body) = send(
+        &app,
+        delete_with_cookie("/api/v1/services/service-1/autoscaling", &session_cookie),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
 }
 
 #[tokio::test]

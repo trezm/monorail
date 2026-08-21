@@ -25,6 +25,8 @@ pub const RAILWAY_ISSUER: &str = "API_RAILWAY_ISSUER";
 pub const RAILWAY_TIMEOUT_SECS: &str = "API_RAILWAY_TIMEOUT_SECS";
 pub const SESSION_TTL_SECS: &str = "API_SESSION_TTL_SECS";
 pub const AUTH_SUCCESS_REDIRECT: &str = "API_AUTH_SUCCESS_REDIRECT";
+pub const AUTOSCALER_ENABLED: &str = "API_AUTOSCALER_ENABLED";
+pub const AUTOSCALER_TICK_SECS: &str = "API_AUTOSCALER_TICK_SECS";
 
 pub const DEFAULT_PORT: u16 = 8080;
 pub const DEFAULT_LOG_FILTER: &str = "info,tower_http=debug,monorail_api=debug";
@@ -70,3 +72,18 @@ pub const DEFAULT_SESSION_TTL_SECS: u64 = 14 * 24 * 60 * 60; // 14 days
 /// Where a finished login sends the browser. The default is the Astro dev
 /// server, which is what a local checkout runs.
 pub const DEFAULT_AUTH_SUCCESS_REDIRECT: &str = "http://localhost:4321/";
+
+pub const DEFAULT_AUTOSCALER_ENABLED: bool = true;
+
+/// How often the autoscaler looks for due rules. The floor on reaction time,
+/// not the polling rate — each rule brings its own frequency.
+pub const DEFAULT_AUTOSCALER_TICK_SECS: u64 = 30;
+
+/// How far back a sweep reads a rule's metric. Long enough that one noisy
+/// sample cannot move the average on its own, short enough to still be about
+/// now.
+pub const AUTOSCALER_METRICS_WINDOW_SECS: i64 = 300;
+
+/// The server-side bucket width asked of Railway's metrics query, so a window
+/// arrives as a handful of points rather than one per scrape.
+pub const AUTOSCALER_SAMPLE_RATE_SECS: i64 = 60;

@@ -27,6 +27,7 @@ The service requires Postgres and refuses to start without it. See
 | `src/shutdown.rs` | SIGINT/SIGTERM handling. |
 | `src/bin/migrate.rs` | Applies pending migrations and exits. |
 | `src/secret.rs` | A wrapper that keeps a string out of logs. |
+| `src/autoscaler.rs` | The horizontal autoscaling loop. |
 | `src/routes/` | HTTP handlers, one module per resource. |
 | `src/services/` | Business logic, one trait per capability. |
 | `migrations/` | Schema history, embedded into the binary. |
@@ -266,6 +267,45 @@ browser back through a login rather than a `400` it can do nothing with.
 Renewal is per-request and unsynchronised: two requests arriving on the same
 expired session both refresh, and the second write wins. Both tokens work, so
 the cost is a wasted call rather than a broken session.
+
+## Autoscaling
+
+`POST /api/v1/services/{id}/autoscaling` creates the horizontal autoscaling
+rule for a service: a metric (`CPU`, `MEMORY`, `NETWORK_RX`, `NETWORK_TX`), a
+min/max threshold band in the metric's unit (vCPU cores, or gigabytes), a
+min/max replica count the loop may steer between, a poll frequency, and the
+environment to scale in. A service takes exactly one rule — two rules steering
+the same replica count could fight — so `service_id` is the primary key and
+the same path serves `GET` and `DELETE`.
+
+[`src/services/autoscaling.rs`](src/services/autoscaling.rs) is the store —
+`AutoscaleStore` the capability, `PgAutoscaleStore` the implementation — and
+[`src/autoscaler.rs`](src/autoscaler.rs) is the loop that acts on it. Each
+tick (`API_AUTOSCALER_TICK_SECS`) it takes the rules whose poll frequency has
+elapsed, averages the metric over the last five minutes via Railway's
+`metrics` query, and moves the replica count by one when the average leaves
+the threshold band, clamped into the rule's replica band. The clamp is
+authoritative — a count moved outside the band by hand comes back inside it —
+and the migration keeps `min_count >= 1`, so a rule can never stop a service.
+Replica changes go out as `serviceInstanceUpdate` plus
+`serviceInstanceDeployV2`, because Railway stages instance updates until a
+deploy applies them.
+
+The loop authenticates as the rule's owner through the session store:
+`Credentials::access_token_for_user` reads their freshest live session and
+renews its access token with the same machinery requests use, written back by
+session row since the loop holds no cookie. An owner with no live session has
+rules that wait, not rules that break. One credential lookup per owner per
+sweep; the loop assumes it runs alone — a second poller would double-scale,
+and needs rule claiming (a checked-out column, or `FOR UPDATE SKIP LOCKED`)
+first.
+
+The loop is its own module with its dependencies passed in as handles, so it
+can detach into its own service; `API_AUTOSCALER_ENABLED=false` is that
+future's flag and today's off switch. Known simplifications, noted in the
+module: every sweep hits Postgres where a pass-through KV cache would do, and
+the aggregate is a plain mean where a trimmed mean or percentile would resist
+outliers better.
 
 ## Configuration
 
