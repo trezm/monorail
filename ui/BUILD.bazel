@@ -20,6 +20,8 @@ SRCS = [
 
 DEPS = [
     ":node_modules/@astrojs/react",
+    ":node_modules/@fontsource-variable/inter",
+    ":node_modules/@fontsource-variable/jetbrains-mono",
     ":node_modules/astro",
     ":node_modules/react",
     ":node_modules/react-dom",

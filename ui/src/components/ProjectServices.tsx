@@ -118,17 +118,19 @@ export default function ProjectServices({ project, active }: { project: Project;
       {loaded.length > 0 && (
         <label className="environments">
           <span className="environments__label">Environment</span>
-          <select
-            className="environments__select"
-            value={selected ?? ''}
-            onChange={(event) => setSelected(event.target.value)}
-          >
-            {loaded.map((environment) => (
-              <option key={environment.id} value={environment.id}>
-                {environment.name}
-              </option>
-            ))}
-          </select>
+          <span className="select-wrap">
+            <select
+              className="environments__select"
+              value={selected ?? ''}
+              onChange={(event) => setSelected(event.target.value)}
+            >
+              {loaded.map((environment) => (
+                <option key={environment.id} value={environment.id}>
+                  {environment.name}
+                </option>
+              ))}
+            </select>
+          </span>
         </label>
       )}
 
@@ -403,11 +405,23 @@ function restartPolicy(type: string, maxRetries: number | null) {
     : words(type);
 }
 
-function statusClass(status: string) {
-  if (status === 'SUCCESS') return 'instance__status instance__status--ok';
-  if (status === 'CRASHED' || status === 'FAILED') return 'instance__status instance__status--bad';
+/** Statuses that are on their way somewhere, shown with a pulsing dot. */
+const IN_FLIGHT = new Set([
+  'BUILDING',
+  'DEPLOYING',
+  'INITIALIZING',
+  'QUEUED',
+  'WAITING',
+  'REMOVING',
+  'RESTARTING',
+]);
 
-  return 'instance__status';
+function statusClass(status: string) {
+  if (status === 'SUCCESS') return 'status-pill status-pill--ok';
+  if (status === 'CRASHED' || status === 'FAILED') return 'status-pill status-pill--bad';
+  if (IN_FLIGHT.has(status)) return 'status-pill status-pill--busy';
+
+  return 'status-pill';
 }
 
 /** Falls back to the raw value rather than rendering `Invalid Date`. */
