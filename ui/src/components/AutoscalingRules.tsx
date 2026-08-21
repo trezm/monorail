@@ -211,19 +211,21 @@ function NewRuleForm({
       <label className="visually-hidden" htmlFor={`${id}-metric`}>
         Metric
       </label>
-      <select
-        id={`${id}-metric`}
-        className="autoscaling__input autoscaling__input--metric"
-        value={metric}
-        onChange={(event) => setMetric(event.currentTarget.value as Metric)}
-        disabled={busy}
-      >
-        {(Object.keys(METRICS) as Metric[]).map((option) => (
-          <option key={option} value={option}>
-            {METRICS[option].label}
-          </option>
-        ))}
-      </select>
+      <span className="select-wrap">
+        <select
+          id={`${id}-metric`}
+          className="autoscaling__input autoscaling__input--metric"
+          value={metric}
+          onChange={(event) => setMetric(event.currentTarget.value as Metric)}
+          disabled={busy}
+        >
+          {(Object.keys(METRICS) as Metric[]).map((option) => (
+            <option key={option} value={option}>
+              {METRICS[option].label}
+            </option>
+          ))}
+        </select>
+      </span>
 
       <label className="visually-hidden" htmlFor={`${id}-min`}>
         Minimum threshold in {METRICS[metric].unit}

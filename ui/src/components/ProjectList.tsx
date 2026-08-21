@@ -77,8 +77,42 @@ export default function ProjectList() {
   };
 
   if (failed) return <p className="notice notice--error">Your projects could not be loaded.</p>;
-  if (loaded === null) return <p className="notice">Loading your projects…</p>;
-  if (loaded.length === 0) return <p className="notice">This Railway account has no projects yet.</p>;
+
+  if (loaded === null) {
+    return (
+      <div className="skeleton-list" role="status">
+        <span className="visually-hidden">Loading your projects…</span>
+        {[0, 1, 2].map((row) => (
+          <div key={row} className="skeleton-card" aria-hidden="true">
+            <span className="skeleton skeleton--title" />
+            <span className="skeleton skeleton--pill" />
+          </div>
+        ))}
+      </div>
+    );
+  }
+
+  if (loaded.length === 0) {
+    return (
+      <div className="empty-state">
+        <svg
+          className="empty-state__icon"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="1.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          aria-hidden="true"
+        >
+          <path d="m12 3 9 5-9 5-9-5 9-5Z" />
+          <path d="m3 13.5 9 5 9-5" />
+        </svg>
+        <p className="empty-state__title">No projects yet</p>
+        <p className="empty-state__hint">Projects you create on Railway will appear here.</p>
+      </div>
+    );
+  }
 
   return (
     <ul className="projects">
