@@ -240,11 +240,11 @@ read on demand, and an instance exists per service *and* environment: fetching
 every combination up front is the oversized query this surface has answered
 with a `503` before.
 
-`POST /api/v1/services/{id}/spin-down?environment={id}` stops the service's
+`POST /api/v1/services/{id}/spin-down?environment={id}` removes the service's
 latest deployment there — a spin-down rather than a delete, because the
-deployment stays in Railway's history as `REMOVED` and the service and its
-configuration survive. `404` when there is no instance, `422` when nothing is
-running, `204` on success: stopping leaves nothing to describe.
+service and its configuration survive and spin-up brings it back from source.
+`404` when there is no instance, `422` when nothing is running, `204` on
+success: removal leaves nothing to describe.
 
 `POST /api/v1/services/{id}/spin-up?environment={id}` is the way back: it
 deploys the service's configured source afresh, answering `201` with the fresh
