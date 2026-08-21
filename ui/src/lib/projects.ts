@@ -127,10 +127,9 @@ export async function createService(
 }
 
 /**
- * Spins a service down in one environment: the latest deployment is stopped
- * and stays in Railway's history as removed; the service and its
- * configuration stay. The caller refetches the instance afterwards for the
- * deployment's new state.
+ * Spins a service down in one environment: the latest deployment is removed,
+ * the service and its configuration stay. The caller refetches the instance
+ * afterwards for the deployment's new state.
  */
 export async function spinDownService(serviceId: string, environmentId: string): Promise<void> {
   const response = await fetch(

@@ -236,11 +236,12 @@ pub trait RailwayApi: Send + Sync + 'static {
         replicas: i64,
     ) -> RailwayResult<()>;
 
-    /// Spins a service down in one environment by stopping its latest
-    /// deployment, which stays in Railway's history as `REMOVED`. The service
-    /// and its configuration survive; only the running thing goes away.
+    /// Spins a service down in one environment by removing its latest
+    /// deployment. The service and its configuration survive, and
+    /// [`spin_up`](RailwayApi::spin_up) brings it back by deploying from
+    /// source, so nothing depends on what removal leaves behind.
     /// [`RailwayError::NotFound`] when the service has no instance there,
-    /// [`RailwayError::Rejected`] when nothing is running to stop.
+    /// [`RailwayError::Rejected`] when nothing is running to remove.
     async fn spin_down(
         &self,
         access_token: &Secret,
@@ -341,14 +342,14 @@ mutation ServiceCreate($input: ServiceCreateInput!) {
 }
 ";
 
-/// Spinning down is Railway's own "Remove" on the running deployment, which
-/// the public API names `deploymentStop`: the containers stop and the
-/// deployment stays in history as `REMOVED`. Not `deploymentRemove` — that
-/// deletes the deployment from history, leaving nothing to show a spin-down
-/// ever happened.
-const DEPLOYMENT_STOP_MUTATION: &str = r"
-mutation DeploymentStop($id: String!) {
-  deploymentStop(id: $id)
+/// Spinning down is `deploymentRemove` — the mutation behind `railway down`,
+/// and the one that actually takes the containers down: `deploymentStop`
+/// sounds like the gentler fit but answers `true` while leaving the service
+/// running. Spin-up never needs the removed deployment back, so whatever
+/// removal does to the history row does not matter here.
+const DEPLOYMENT_REMOVE_MUTATION: &str = r"
+mutation DeploymentRemove($id: String!) {
+  deploymentRemove(id: $id)
 }
 ";
 
@@ -604,9 +605,10 @@ impl RailwayApi for RailwayGraphQl {
             .service_instance(access_token, service_id, environment_id)
             .await?;
 
-        // The latest deployment is what gets stopped — unless the service has
+        // The latest deployment is what gets removed — unless the service has
         // nothing running, which is the caller's situation to hear about, not
-        // a provider fault.
+        // a provider fault. `None` covers spun down and never deployed alike:
+        // an earlier removal may have left no deployment behind.
         let deployment = match instance.latest_deployment {
             Some(deployment)
                 if deployment.status != "REMOVED" && deployment.status != "REMOVING" =>
@@ -620,24 +622,27 @@ impl RailwayApi for RailwayGraphQl {
             }
             None => {
                 return Err(RailwayError::Rejected(
-                    "the service has never been deployed in this environment".to_owned(),
+                    "the service has nothing running in this environment".to_owned(),
                 ));
             }
         };
 
         let body = serde_json::json!({
-            "query": DEPLOYMENT_STOP_MUTATION,
+            "query": DEPLOYMENT_REMOVE_MUTATION,
             "variables": { "id": deployment.id },
         });
 
-        let envelope: GraphQlResponse<DeploymentStopMutation> =
-            self.post(access_token, &body, "deployment stop").await?;
+        let envelope: GraphQlResponse<DeploymentRemoveMutation> =
+            self.post(access_token, &body, "deployment removal").await?;
 
-        if envelope.into_data(RailwayError::Rejected)?.deployment_stop {
+        if envelope
+            .into_data(RailwayError::Rejected)?
+            .deployment_remove
+        {
             Ok(())
         } else {
             Err(RailwayError::Provider(anyhow::anyhow!(
-                "Railway answered the deployment stop with a refusal it did not explain"
+                "Railway answered the deployment removal with a refusal it did not explain"
             )))
         }
     }
@@ -893,8 +898,8 @@ struct ServiceCreateMutation {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeploymentStopMutation {
-    deployment_stop: bool,
+struct DeploymentRemoveMutation {
+    deployment_remove: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1233,8 +1238,8 @@ mod tests {
     }
 
     #[test]
-    fn a_declined_stop_carries_railways_message() {
-        let error = serde_json::from_str::<GraphQlResponse<DeploymentStopMutation>>(
+    fn a_declined_removal_carries_railways_message() {
+        let error = serde_json::from_str::<GraphQlResponse<DeploymentRemoveMutation>>(
             r#"{"data":null,"errors":[{"message":"Deployment not found"}]}"#,
         )
         .expect("body should parse")
