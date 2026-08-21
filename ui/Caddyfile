@@ -1,0 +1,19 @@
+# Single public origin: static Astro output, with the API's browser-facing
+# routes proxied over Railway's private network. Same-origin is load-bearing —
+# the session cookie is SameSite=Lax, and *.up.railway.app subdomains are
+# different sites (the domain is on the Public Suffix List).
+{
+	admin off
+}
+
+:{$PORT:4321} {
+	@backend path /api/* /auth/* /health/*
+	handle @backend {
+		reverse_proxy {$API_ORIGIN:http://api.railway.internal:8080}
+	}
+	handle {
+		root * /srv
+		encode zstd gzip
+		file_server
+	}
+}
