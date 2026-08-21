@@ -208,6 +208,12 @@ function NewRuleForm({
 
   return (
     <form className="autoscaling__form" onSubmit={submit}>
+      <p className="autoscaling__hint">
+        Thresholds apply to the service as a whole: Railway sums each metric across every
+        replica, so two replicas using 100 MB each read as 200 MB. Size the band for total
+        usage, not per-replica usage.
+      </p>
+
       <label className="visually-hidden" htmlFor={`${id}-metric`}>
         Metric
       </label>
