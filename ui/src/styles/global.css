@@ -487,6 +487,13 @@ p {
   gap: 0.4rem;
 }
 
+.autoscaling__hint {
+  flex-basis: 100%;
+  margin: 0 0 0.2rem;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
 .autoscaling__input {
   width: 6.5rem;
   min-width: 0;
