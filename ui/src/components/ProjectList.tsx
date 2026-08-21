@@ -19,6 +19,7 @@ export default function ProjectList() {
   const [loaded, setLoaded] = useState<Project[] | null>(null);
   const [failed, setFailed] = useState(false);
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
+  const [refreshes, setRefreshes] = useState<Readonly<Record<string, 'busy' | 'failed'>>>({});
 
   useEffect(() => {
     let live = true;
@@ -64,6 +65,39 @@ export default function ProjectList() {
           : project,
       );
     });
+  };
+
+  /**
+   * Refetches one project's row. The API only serves the whole list — Railway
+   * assembles it in a single query anyway, so a per-project GET would be the
+   * same round trip — and the fresh copy replaces just the asked-about
+   * project, or drops it when the account no longer has it. A new `services`
+   * array is what makes `ProjectServices` refetch its instance details.
+   */
+  const refresh = (projectId: string) => {
+    setRefreshes((current) => ({ ...current, [projectId]: 'busy' }));
+
+    projects()
+      .then((found) => {
+        const fresh = found.find((project) => project.id === projectId);
+
+        setLoaded((current) => {
+          if (!current) return current;
+
+          return fresh
+            ? current.map((project) => (project.id === projectId ? fresh : project))
+            : current.filter((project) => project.id !== projectId);
+        });
+        setRefreshes(({ [projectId]: done, ...rest }) => rest);
+      })
+      .catch((cause: unknown) => {
+        if (cause instanceof SessionExpired) {
+          session.logOut().catch(() => setFailed(true));
+          return;
+        }
+
+        setRefreshes((current) => ({ ...current, [projectId]: 'failed' }));
+      });
   };
 
   const toggle = (id: string, open: boolean) => {
@@ -138,6 +172,37 @@ export default function ProjectList() {
               <span className="project__count">
                 {project.services.length} {project.services.length === 1 ? 'service' : 'services'}
               </span>
+              <button
+                type="button"
+                className={
+                  refreshes[project.id] === 'busy'
+                    ? 'project__refresh project__refresh--busy'
+                    : 'project__refresh'
+                }
+                aria-label={`Refresh ${project.name}`}
+                title="Refresh"
+                disabled={refreshes[project.id] === 'busy'}
+                onClick={(event) => {
+                  // Activating a button inside <summary> still toggles the
+                  // disclosure unless the default is prevented.
+                  event.preventDefault();
+                  refresh(project.id);
+                }}
+              >
+                <svg
+                  className="project__refresh-icon"
+                  viewBox="0 0 24 24"
+                  fill="none"
+                  stroke="currentColor"
+                  strokeWidth="2.6"
+                  strokeLinecap="round"
+                  strokeLinejoin="round"
+                  aria-hidden="true"
+                >
+                  <path d="M21 12a9 9 0 1 1-9-9c2.52 0 4.93 1 6.74 2.74L21 8" />
+                  <path d="M21 3v5h-5" />
+                </svg>
+              </button>
             </summary>
 
             {project.description && <p className="project__description">{project.description}</p>}
@@ -153,6 +218,11 @@ export default function ProjectList() {
               onCreated={(service) => addService(project.id, service)}
             />
           </details>
+          {refreshes[project.id] === 'failed' && (
+            <p className="project__refresh-error" role="alert">
+              {project.name} could not be refreshed.
+            </p>
+          )}
         </li>
       ))}
     </ul>
