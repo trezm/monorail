@@ -85,6 +85,13 @@ impl AppState {
         self.sessions.as_ref()
     }
 
+    /// The store as an owned handle, for the autoscaling loop — a task with
+    /// its own lifetime cannot borrow from the state.
+    #[must_use]
+    pub fn sessions_handle(&self) -> Arc<dyn SessionStore> {
+        self.sessions.clone()
+    }
+
     /// Swaps in a different rule store, for a test that needs one that is not
     /// Postgres.
     #[must_use]

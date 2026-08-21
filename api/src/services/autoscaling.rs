@@ -2,19 +2,19 @@
 //!
 //! A rule is local state about a Railway resource: which metric to watch on
 //! one service, the band the average should stay inside, and how often to
-//! look. The loop that acts on them is [`crate::autoscaler`]; this module is
-//! the storage capability both it and the HTTP layer depend on, behind a trait
+//! look. Its identity is (service, metric) — two rules reading the same
+//! signal could only agree or fight, so that pair is the primary key. The
+//! loop that acts on rules is [`crate::autoscaler`]; this module is the
+//! storage capability both it and the HTTP layer depend on, behind a trait
 //! for the same reason [`SessionStore`](super::session::SessionStore) is.
 //!
 //! Rules carry the account that created them because the loop has no
-//! credential of its own — it acts on Railway with the owner's, read from the
-//! freshest of their live sessions. An owner with no live session left has a
-//! rule that waits, not one that breaks.
+//! credential of its own; the session store is what turns that owner into a
+//! usable Railway token. Sessions are deliberately not this store's business.
 
 use chrono::{DateTime, Utc};
 use diesel::{
-    ExpressionMethods as _, OptionalExtension as _, QueryDsl as _, Queryable, Selectable,
-    SelectableHelper as _,
+    ExpressionMethods as _, QueryDsl as _, Queryable, Selectable, SelectableHelper as _,
     deserialize::{self, FromSql, FromSqlRow},
     expression::AsExpression,
     pg::{Pg, PgValue},
@@ -28,16 +28,15 @@ use uuid::Uuid;
 use crate::{
     db::{Database, DbError},
     error::ApiError,
-    schema::{horizontal_autoscaling, sessions},
-    secret::Secret,
-    services::{auth::TokenSet, railway::Measurement},
+    schema::horizontal_autoscaling,
+    services::railway::Measurement,
 };
 
 pub type AutoscaleResult<T> = Result<T, AutoscaleError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AutoscaleError {
-    /// The service already has a rule for this metric — the unique constraint,
+    /// The service already has a rule for this metric — the primary key,
     /// surfaced as a conflict the caller resolves by removing the old rule.
     #[error("this service already has a rule for that metric")]
     Duplicate,
@@ -140,12 +139,11 @@ impl FromSql<sql_types::Text, Pg> for Metric {
 #[derive(Debug, Clone, PartialEq, Queryable, Selectable, Serialize)]
 #[diesel(table_name = horizontal_autoscaling, check_for_backend(Pg))]
 pub struct Rule {
-    pub id: Uuid,
+    pub service_id: String,
+    pub metric: Metric,
     #[serde(skip)]
     pub user_id: Uuid,
-    pub service_id: String,
     pub environment_id: String,
-    pub metric: Metric,
     pub min_threshold: f64,
     pub max_threshold: f64,
     pub poll_frequency_secs: i32,
@@ -164,23 +162,6 @@ pub struct NewRule {
     pub poll_frequency_secs: i32,
 }
 
-/// A credential the loop can act with: the session row it came from — the
-/// address a renewed token is written back to — and the tokens themselves.
-#[derive(Debug, Clone)]
-pub struct RuleCredentials {
-    pub session_id: Uuid,
-    pub tokens: TokenSet,
-}
-
-/// A rule whose poll frequency has elapsed, with its owner's freshest live
-/// session. `None` when every session has expired — only a new login fixes
-/// that, so the loop skips rather than errors.
-#[derive(Debug, Clone)]
-pub struct DueRule {
-    pub rule: Rule,
-    pub credentials: Option<RuleCredentials>,
-}
-
 /// Creates, reads and removes autoscaling rules.
 ///
 /// One trait for both halves — the HTTP layer's CRUD and the loop's sweep —
@@ -194,21 +175,21 @@ pub trait AutoscaleStore: Send + Sync + 'static {
     /// The owner's rules for one service, oldest first.
     async fn list(&self, owner: Uuid, service_id: &str) -> AutoscaleResult<Vec<Rule>>;
 
-    /// `false` when nothing was removed — an unknown id, or a rule that is not
+    /// `false` when nothing was removed — no such rule, or a rule that is not
     /// the owner's to remove.
-    async fn remove(&self, owner: Uuid, service_id: &str, rule_id: Uuid) -> AutoscaleResult<bool>;
+    async fn remove(&self, owner: Uuid, service_id: &str, metric: Metric) -> AutoscaleResult<bool>;
 
     /// Every rule due at `now`: never checked, or checked longer ago than its
     /// poll frequency.
-    async fn due(&self, now: DateTime<Utc>) -> AutoscaleResult<Vec<DueRule>>;
+    async fn due(&self, now: DateTime<Utc>) -> AutoscaleResult<Vec<Rule>>;
 
     /// Stamps a rule as checked, due again one poll frequency from `now`.
-    async fn mark_checked(&self, rule_id: Uuid, now: DateTime<Utc>) -> AutoscaleResult<()>;
-
-    /// Writes a renewed Railway token set back onto the session it came from.
-    /// The loop's counterpart of [`SessionStore::renew`](super::session::SessionStore::renew),
-    /// keyed by row id because the loop never sees a cookie.
-    async fn renew_credentials(&self, session_id: Uuid, tokens: &TokenSet) -> AutoscaleResult<()>;
+    async fn mark_checked(
+        &self,
+        service_id: &str,
+        metric: Metric,
+        now: DateTime<Utc>,
+    ) -> AutoscaleResult<()>;
 }
 
 /// [`AutoscaleStore`] over the application's Postgres pool.
@@ -256,14 +237,14 @@ impl AutoscaleStore for PgAutoscaleStore {
             .await?)
     }
 
-    async fn remove(&self, owner: Uuid, service_id: &str, rule_id: Uuid) -> AutoscaleResult<bool> {
+    async fn remove(&self, owner: Uuid, service_id: &str, metric: Metric) -> AutoscaleResult<bool> {
         let mut conn = self.database.conn().await?;
 
         let removed = diesel::delete(
             horizontal_autoscaling::table
-                .filter(horizontal_autoscaling::id.eq(rule_id))
-                .filter(horizontal_autoscaling::user_id.eq(owner))
-                .filter(horizontal_autoscaling::service_id.eq(service_id)),
+                .filter(horizontal_autoscaling::service_id.eq(service_id))
+                .filter(horizontal_autoscaling::metric.eq(metric))
+                .filter(horizontal_autoscaling::user_id.eq(owner)),
         )
         .execute(&mut conn)
         .await?;
@@ -271,12 +252,16 @@ impl AutoscaleStore for PgAutoscaleStore {
         Ok(removed > 0)
     }
 
-    async fn due(&self, now: DateTime<Utc>) -> AutoscaleResult<Vec<DueRule>> {
+    async fn due(&self, now: DateTime<Utc>) -> AutoscaleResult<Vec<Rule>> {
         let mut conn = self.database.conn().await?;
 
         // The due predicate lives in SQL because the interval is per-row;
         // diesel has no expression for `column + make_interval(column)`.
-        let rules = horizontal_autoscaling::table
+        //
+        // A single poller is assumed. Running more than one would double-scale
+        // every due rule: they need to claim rules rather than read them — a
+        // checked-out-at column, or `FOR UPDATE SKIP LOCKED` around the sweep.
+        Ok(horizontal_autoscaling::table
             .filter(
                 diesel::dsl::sql::<sql_types::Bool>(
                     "last_checked IS NULL OR last_checked + make_interval(secs => poll_frequency_secs) < ",
@@ -285,56 +270,22 @@ impl AutoscaleStore for PgAutoscaleStore {
             )
             .order(horizontal_autoscaling::created_at.asc())
             .select(Rule::as_select())
-            .load::<Rule>(&mut conn)
-            .await?;
-
-        let mut due = Vec::with_capacity(rules.len());
-
-        for rule in rules {
-            // Freshest by access-token expiry, not session age: the most
-            // recently renewed login is the least likely to need renewing.
-            let credentials = sessions::table
-                .filter(sessions::user_id.eq(rule.user_id))
-                .filter(sessions::expires_at.gt(now))
-                .order(sessions::access_token_expires_at.desc())
-                .select((
-                    sessions::id,
-                    sessions::access_token,
-                    sessions::refresh_token,
-                    sessions::scope,
-                    sessions::access_token_expires_at,
-                ))
-                .first::<(Uuid, String, Option<String>, String, DateTime<Utc>)>(&mut conn)
-                .await
-                .optional()?;
-
-            due.push(DueRule {
-                rule,
-                credentials: credentials.map(
-                    |(session_id, access_token, refresh_token, scope, expires_at)| {
-                        RuleCredentials {
-                            session_id,
-                            tokens: TokenSet {
-                                access_token: Secret::new(access_token),
-                                refresh_token: refresh_token.map(Secret::new),
-                                id_token: None,
-                                scope,
-                                expires_at,
-                            },
-                        }
-                    },
-                ),
-            });
-        }
-
-        Ok(due)
+            .load(&mut conn)
+            .await?)
     }
 
-    async fn mark_checked(&self, rule_id: Uuid, now: DateTime<Utc>) -> AutoscaleResult<()> {
+    async fn mark_checked(
+        &self,
+        service_id: &str,
+        metric: Metric,
+        now: DateTime<Utc>,
+    ) -> AutoscaleResult<()> {
         let mut conn = self.database.conn().await?;
 
         diesel::update(
-            horizontal_autoscaling::table.filter(horizontal_autoscaling::id.eq(rule_id)),
+            horizontal_autoscaling::table
+                .filter(horizontal_autoscaling::service_id.eq(service_id))
+                .filter(horizontal_autoscaling::metric.eq(metric)),
         )
         .set((
             horizontal_autoscaling::last_checked.eq(now),
@@ -342,22 +293,6 @@ impl AutoscaleStore for PgAutoscaleStore {
         ))
         .execute(&mut conn)
         .await?;
-
-        Ok(())
-    }
-
-    async fn renew_credentials(&self, session_id: Uuid, tokens: &TokenSet) -> AutoscaleResult<()> {
-        let mut conn = self.database.conn().await?;
-
-        diesel::update(sessions::table.filter(sessions::id.eq(session_id)))
-            .set((
-                sessions::access_token.eq(tokens.access_token.expose()),
-                sessions::refresh_token.eq(tokens.refresh_token.as_ref().map(Secret::expose)),
-                sessions::scope.eq(&tokens.scope),
-                sessions::access_token_expires_at.eq(tokens.expires_at),
-            ))
-            .execute(&mut conn)
-            .await?;
 
         Ok(())
     }
@@ -468,47 +403,31 @@ mod tests {
 
         let now = Utc::now();
         let due = store.due(now).await.expect("the sweep should read");
-        let entry = due
-            .iter()
-            .find(|entry| entry.rule.id == rule.id)
-            .expect("a never-checked rule should be due");
-        let credentials = entry
-            .credentials
-            .as_ref()
-            .expect("the owner's live session should ride along");
-        assert_eq!(credentials.tokens.access_token.expose(), "access");
-
-        let renewed = TokenSet {
-            access_token: Secret::new("access-renewed"),
-            refresh_token: Some(Secret::new("refresh")),
-            id_token: None,
-            scope: "openid".to_owned(),
-            expires_at: Utc::now() + TimeDelta::hours(1),
-        };
-        store
-            .renew_credentials(credentials.session_id, &renewed)
-            .await
-            .expect("renewal should write back");
+        assert!(
+            due.iter()
+                .any(|due| due.service_id == service_id && due.metric == Metric::Cpu),
+            "a never-checked rule should be due"
+        );
 
         store
-            .mark_checked(rule.id, now)
+            .mark_checked(&service_id, Metric::Cpu, now)
             .await
             .expect("the stamp should write");
         let due = store.due(now).await.expect("the sweep should read");
         assert!(
-            !due.iter().any(|entry| entry.rule.id == rule.id),
+            !due.iter().any(|due| due.service_id == service_id),
             "a freshly checked rule should wait out its poll frequency"
         );
 
         assert!(
             store
-                .remove(owner, &service_id, rule.id)
+                .remove(owner, &service_id, Metric::Cpu)
                 .await
                 .expect("removal should succeed")
         );
         assert!(
             !store
-                .remove(owner, &service_id, rule.id)
+                .remove(owner, &service_id, Metric::Cpu)
                 .await
                 .expect("a second removal should succeed"),
             "removing an absent rule should report nothing removed"

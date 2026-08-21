@@ -273,8 +273,9 @@ the cost is a wasted call rather than a broken session.
 `POST /api/v1/services/{id}/autoscaling` creates a horizontal autoscaling rule
 for a service: a metric (`CPU`, `MEMORY`, `NETWORK_RX`, `NETWORK_TX`), a
 min/max threshold band in the metric's unit (vCPU cores, or gigabytes), a poll
-frequency, and the environment to scale in. One rule per service and metric;
-`GET` lists the caller's, `DELETE .../{rule_id}` removes one.
+frequency, and the environment to scale in. A rule's identity is the (service,
+metric) pair — that is the table's primary key — so `GET` lists the caller's
+and `DELETE .../{metric}` removes one.
 
 [`src/services/autoscaling.rs`](src/services/autoscaling.rs) is the store —
 `AutoscaleStore` the capability, `PgAutoscaleStore` the implementation — and
@@ -286,10 +287,14 @@ the band — never below one replica. Replica changes go out as
 `serviceInstanceUpdate` plus `serviceInstanceDeployV2`, because Railway stages
 instance updates until a deploy applies them.
 
-The loop authenticates as the rule's owner, reading their freshest live
-session and renewing its access token through the same refresh flow requests
-use — written back by session row, since the loop holds no cookie. An owner
-with no live session has rules that wait, not rules that break.
+The loop authenticates as the rule's owner through the session store:
+`Credentials::access_token_for_user` reads their freshest live session and
+renews its access token with the same machinery requests use, written back by
+session row since the loop holds no cookie. An owner with no live session has
+rules that wait, not rules that break. One credential lookup per owner per
+sweep; the loop assumes it runs alone — a second poller would double-scale,
+and needs rule claiming (a checked-out column, or `FOR UPDATE SKIP LOCKED`)
+first.
 
 The loop is its own module with its dependencies passed in as handles, so it
 can detach into its own service; `API_AUTOSCALER_ENABLED=false` is that

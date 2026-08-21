@@ -32,12 +32,11 @@ diesel::table! {
 }
 
 diesel::table! {
-    horizontal_autoscaling (id) {
-        id -> Uuid,
-        user_id -> Uuid,
+    horizontal_autoscaling (service_id, metric) {
         service_id -> Text,
-        environment_id -> Text,
         metric -> Text,
+        user_id -> Uuid,
+        environment_id -> Text,
         min_threshold -> Float8,
         max_threshold -> Float8,
         poll_frequency_secs -> Int4,

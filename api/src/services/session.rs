@@ -116,6 +116,15 @@ pub struct Session {
     pub expires_at: DateTime<Utc>,
 }
 
+/// A session's tokens addressed by row id rather than by cookie — what a
+/// caller holds when it acts for a user without a browser in the loop, like
+/// the autoscaler. The id is where a renewed token set is written back to.
+#[derive(Debug, Clone)]
+pub struct SessionCredentials {
+    pub session_id: Uuid,
+    pub tokens: TokenSet,
+}
+
 /// Opens, reads and closes login sessions.
 ///
 /// A trait for the same reason [`ContainerManager`](super::container::ContainerManager)
@@ -146,6 +155,16 @@ pub trait SessionStore: Send + Sync + 'static {
 
     /// Revokes a session. Absent is success: logging out twice is not an error.
     async fn end(&self, token: &SessionToken) -> SessionResult<()>;
+
+    /// The user's live session with the longest-lived access token — the one
+    /// least likely to need renewing — or `None` when every session has
+    /// expired. For callers acting without a cookie, like the autoscaler.
+    async fn freshest_for_user(&self, user_id: Uuid) -> SessionResult<Option<SessionCredentials>>;
+
+    /// [`Self::renew`] addressed by row id instead of by cookie, for the same
+    /// cookie-less callers. A session that ended in the meantime is not an
+    /// error, exactly as in `renew`.
+    async fn renew_by_id(&self, session_id: Uuid, tokens: &TokenSet) -> SessionResult<()>;
 }
 
 pub type CredentialResult<T> = Result<T, CredentialError>;
@@ -208,15 +227,52 @@ impl<'a> Credentials<'a> {
         token: &SessionToken,
         session: Session,
     ) -> CredentialResult<Secret> {
+        match self.renewed(&session.tokens).await? {
+            None => Ok(session.tokens.access_token),
+            Some(renewed) => {
+                self.sessions.renew(token, &renewed).await?;
+                tracing::debug!(user_id = %session.user.id, "renewed a Railway access token");
+
+                Ok(renewed.access_token)
+            }
+        }
+    }
+
+    /// The same, keyed by user rather than by cookie, for a caller with no
+    /// browser in the loop — the autoscaler. Acts on the user's freshest live
+    /// session; no live session at all is [`CredentialError::Spent`], since
+    /// only a new login fixes it.
+    pub async fn access_token_for_user(&self, user_id: Uuid) -> CredentialResult<Secret> {
+        let credentials = self
+            .sessions
+            .freshest_for_user(user_id)
+            .await?
+            .ok_or(CredentialError::Spent)?;
+
+        match self.renewed(&credentials.tokens).await? {
+            None => Ok(credentials.tokens.access_token),
+            Some(renewed) => {
+                self.sessions
+                    .renew_by_id(credentials.session_id, &renewed)
+                    .await?;
+                tracing::debug!(%user_id, "renewed a Railway access token");
+
+                Ok(renewed.access_token)
+            }
+        }
+    }
+
+    /// The one renewal implementation behind both entry points. `None` means
+    /// the token is still good and nothing needs writing back.
+    async fn renewed(&self, tokens: &TokenSet) -> CredentialResult<Option<TokenSet>> {
         let skew =
             TimeDelta::try_seconds(ACCESS_TOKEN_EXPIRY_SKEW_SECS).unwrap_or_else(TimeDelta::zero);
 
-        if !session.tokens.is_expired_at(Utc::now() + skew) {
-            return Ok(session.tokens.access_token);
+        if !tokens.is_expired_at(Utc::now() + skew) {
+            return Ok(None);
         }
 
-        let previous = session.tokens;
-        let refresh_token = previous
+        let refresh_token = tokens
             .refresh_token
             .as_ref()
             .ok_or(CredentialError::Spent)?;
@@ -224,7 +280,7 @@ impl<'a> Credentials<'a> {
         let mut renewed = match self.auth.refresh(refresh_token).await {
             Ok(renewed) => renewed,
             // A grant the provider has stopped honouring is the user's cue to
-            // log in again, not a bad request from the browser that asked.
+            // log in again, not a bad request from the caller that asked.
             Err(AuthError::InvalidGrant) => return Err(CredentialError::Spent),
             Err(error) => return Err(error.into()),
         };
@@ -233,13 +289,10 @@ impl<'a> Credentials<'a> {
         // means the old one still stands, and overwriting it with nothing would
         // end the session at the next expiry.
         if renewed.refresh_token.is_none() {
-            renewed.refresh_token = previous.refresh_token;
+            renewed.refresh_token = tokens.refresh_token.clone();
         }
 
-        self.sessions.renew(token, &renewed).await?;
-        tracing::debug!(user_id = %session.user.id, "renewed a Railway access token");
-
-        Ok(renewed.access_token)
+        Ok(Some(renewed))
     }
 }
 
@@ -393,6 +446,54 @@ impl SessionStore for PgSessionStore {
 
         Ok(())
     }
+
+    async fn freshest_for_user(&self, user_id: Uuid) -> SessionResult<Option<SessionCredentials>> {
+        let mut conn = self.database.conn().await?;
+
+        let row = sessions::table
+            .filter(sessions::user_id.eq(user_id))
+            .filter(sessions::expires_at.gt(Utc::now()))
+            .order(sessions::access_token_expires_at.desc())
+            .select((
+                sessions::id,
+                sessions::access_token,
+                sessions::refresh_token,
+                sessions::scope,
+                sessions::access_token_expires_at,
+            ))
+            .first::<(Uuid, String, Option<String>, String, DateTime<Utc>)>(&mut conn)
+            .await
+            .optional()?;
+
+        Ok(row.map(
+            |(session_id, access_token, refresh_token, scope, expires_at)| SessionCredentials {
+                session_id,
+                tokens: TokenSet {
+                    access_token: Secret::new(access_token),
+                    refresh_token: refresh_token.map(Secret::new),
+                    id_token: None,
+                    scope,
+                    expires_at,
+                },
+            },
+        ))
+    }
+
+    async fn renew_by_id(&self, session_id: Uuid, tokens: &TokenSet) -> SessionResult<()> {
+        let mut conn = self.database.conn().await?;
+
+        diesel::update(sessions::table.filter(sessions::id.eq(session_id)))
+            .set((
+                sessions::access_token.eq(tokens.access_token.expose()),
+                sessions::refresh_token.eq(tokens.refresh_token.as_ref().map(Secret::expose)),
+                sessions::scope.eq(&tokens.scope),
+                sessions::access_token_expires_at.eq(tokens.expires_at),
+            ))
+            .execute(&mut conn)
+            .await?;
+
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -469,6 +570,32 @@ mod tests {
         assert_eq!(found.user.email.as_deref(), Some("jane@example.test"));
         assert_eq!(found.tokens.access_token.expose(), "access");
         assert_eq!(found.tokens.scope, "openid email");
+
+        let credentials = store
+            .freshest_for_user(found.user.id)
+            .await
+            .expect("the cookie-less read should succeed")
+            .expect("the live session should be found");
+        assert_eq!(credentials.session_id, opened.id);
+        assert_eq!(credentials.tokens.access_token.expose(), "access");
+
+        let mut renewed = found.tokens.clone();
+        renewed.access_token = Secret::new("access-renewed");
+        store
+            .renew_by_id(credentials.session_id, &renewed)
+            .await
+            .expect("renewal by id should write back");
+        assert_eq!(
+            store
+                .freshest_for_user(found.user.id)
+                .await
+                .expect("the cookie-less read should succeed")
+                .expect("the live session should be found")
+                .tokens
+                .access_token
+                .expose(),
+            "access-renewed"
+        );
 
         let (second, reopened) = store
             .begin(&identity, found.tokens.clone())

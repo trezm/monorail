@@ -64,9 +64,9 @@ export default function AutoscalingRules({
   const remove = (rule: Rule) => {
     setError(null);
 
-    removeRule(serviceId, rule.id)
+    removeRule(serviceId, rule.metric)
       .then(() => {
-        setLoaded((current) => current?.filter((kept) => kept.id !== rule.id) ?? current);
+        setLoaded((current) => current?.filter((kept) => kept.metric !== rule.metric) ?? current);
       })
       .catch((cause: unknown) => {
         if (cause instanceof SessionExpired) {
@@ -96,7 +96,7 @@ export default function AutoscalingRules({
       {loaded.length > 0 && (
         <ul className="autoscaling__rules">
           {loaded.map((rule) => (
-            <li key={rule.id} className="autoscaling__rule">
+            <li key={rule.metric} className="autoscaling__rule">
               <span className="autoscaling__summary">
                 {METRICS[rule.metric].label}: {rule.min_threshold}–{rule.max_threshold}{' '}
                 {METRICS[rule.metric].unit} · every {rule.poll_frequency_secs}s

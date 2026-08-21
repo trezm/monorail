@@ -7,12 +7,11 @@ use axum::{
     routing::{delete, get},
 };
 use serde::Serialize;
-use uuid::Uuid;
 
 use crate::{
     error::{ApiError, ApiResult},
     extract::{CurrentUser, Json, Path},
-    services::autoscaling::{NewRule, Rule},
+    services::autoscaling::{Metric, NewRule, Rule},
     state::AppState,
 };
 
@@ -20,7 +19,7 @@ pub fn router() -> Router<AppState> {
     Router::new()
         .route("/services/{service_id}/autoscaling", get(list).post(create))
         .route(
-            "/services/{service_id}/autoscaling/{rule_id}",
+            "/services/{service_id}/autoscaling/{metric}",
             delete(remove),
         )
 }
@@ -81,20 +80,22 @@ async fn create(
     Ok((StatusCode::CREATED, Json(rule)))
 }
 
-/// `404` for an unknown rule and for another account's alike — this endpoint
-/// does not confirm other people's rules exist.
+/// A rule is addressed by what it is — the service and the metric it watches
+/// — because that pair is its identity. `404` for an absent rule and for
+/// another account's alike — this endpoint does not confirm other people's
+/// rules exist.
 async fn remove(
     State(state): State<AppState>,
-    Path((service_id, rule_id)): Path<(String, Uuid)>,
+    Path((service_id, metric)): Path<(String, Metric)>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
     if state
         .autoscaling()
-        .remove(user.id, &service_id, rule_id)
+        .remove(user.id, &service_id, metric)
         .await?
     {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError::not_found("autoscaling rule", rule_id))
+        Err(ApiError::not_found("autoscaling rule", metric.as_str()))
     }
 }

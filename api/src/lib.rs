@@ -126,7 +126,14 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
     if state.config().autoscaler_enabled {
         let tick = state.config().autoscaler_tick;
         tokio::spawn(
-            autoscaler::Autoscaler::new(state.autoscaling_handle(), railway, auth, tick).run(),
+            autoscaler::Autoscaler::new(
+                state.autoscaling_handle(),
+                state.sessions_handle(),
+                railway,
+                auth,
+                tick,
+            )
+            .run(),
         );
         tracing::info!(tick_secs = tick.as_secs(), "autoscaler running");
     }

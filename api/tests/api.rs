@@ -23,12 +23,12 @@ use monorail_api::{
     routes::auth::{PENDING_COOKIE, SESSION_COOKIE},
     services::{
         auth::{AuthError, AuthProvider, AuthResult, CsrfState, Pkce, RailwayIdentity, TokenSet},
-        autoscaling::{AutoscaleError, AutoscaleResult, AutoscaleStore, DueRule, NewRule, Rule},
+        autoscaling::{AutoscaleError, AutoscaleResult, AutoscaleStore, Metric, NewRule, Rule},
         railway::{
             Deployment, Environment as RailwayEnvironment, Measurement, MetricSample, Project,
             RailwayApi, RailwayError, RailwayResult, Service, ServiceInstance, ServiceSource,
         },
-        session::{Session, SessionResult, SessionStore, SessionToken, User},
+        session::{Session, SessionCredentials, SessionResult, SessionStore, SessionToken, User},
     },
 };
 use serde_json::Value;
@@ -291,6 +291,14 @@ impl SessionStore for MemorySessions {
     async fn end(&self, token: &SessionToken) -> SessionResult<()> {
         self.rows.lock().expect("lock").remove(&token.digest());
         Ok(())
+    }
+
+    async fn freshest_for_user(&self, _user_id: Uuid) -> SessionResult<Option<SessionCredentials>> {
+        unreachable!("only the autoscaling loop reads sessions by user, and no route test runs it")
+    }
+
+    async fn renew_by_id(&self, _session_id: Uuid, _tokens: &TokenSet) -> SessionResult<()> {
+        unreachable!("only the autoscaling loop renews by row id, and no route test runs it")
     }
 }
 
@@ -560,7 +568,6 @@ impl RailwayApi for StubRailway {
 #[derive(Default)]
 struct MemoryAutoscale {
     rules: Mutex<Vec<Rule>>,
-    next_id: Mutex<u128>,
 }
 
 #[async_trait::async_trait]
@@ -575,15 +582,11 @@ impl AutoscaleStore for MemoryAutoscale {
             return Err(AutoscaleError::Duplicate);
         }
 
-        let mut next_id = self.next_id.lock().expect("lock");
-        *next_id += 1;
-
         let row = Rule {
-            id: Uuid::from_u128(*next_id),
-            user_id: owner,
             service_id: service_id.to_owned(),
-            environment_id: rule.environment_id,
             metric: rule.metric,
+            user_id: owner,
+            environment_id: rule.environment_id,
             min_threshold: rule.min_threshold,
             max_threshold: rule.max_threshold,
             poll_frequency_secs: rule.poll_frequency_secs,
@@ -608,29 +611,26 @@ impl AutoscaleStore for MemoryAutoscale {
             .collect())
     }
 
-    async fn remove(&self, owner: Uuid, service_id: &str, rule_id: Uuid) -> AutoscaleResult<bool> {
+    async fn remove(&self, owner: Uuid, service_id: &str, metric: Metric) -> AutoscaleResult<bool> {
         let mut rules = self.rules.lock().expect("lock");
         let before = rules.len();
 
         rules.retain(|rule| {
-            !(rule.id == rule_id && rule.user_id == owner && rule.service_id == service_id)
+            !(rule.service_id == service_id && rule.metric == metric && rule.user_id == owner)
         });
 
         Ok(rules.len() < before)
     }
 
-    async fn due(&self, _now: DateTime<Utc>) -> AutoscaleResult<Vec<DueRule>> {
+    async fn due(&self, _now: DateTime<Utc>) -> AutoscaleResult<Vec<Rule>> {
         unreachable!("no route test runs the autoscaling loop")
     }
 
-    async fn mark_checked(&self, _rule_id: Uuid, _now: DateTime<Utc>) -> AutoscaleResult<()> {
-        unreachable!("no route test runs the autoscaling loop")
-    }
-
-    async fn renew_credentials(
+    async fn mark_checked(
         &self,
-        _session_id: Uuid,
-        _tokens: &TokenSet,
+        _service_id: &str,
+        _metric: Metric,
+        _now: DateTime<Utc>,
     ) -> AutoscaleResult<()> {
         unreachable!("no route test runs the autoscaling loop")
     }
@@ -1268,13 +1268,13 @@ async fn an_autoscaling_rule_round_trips() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(body["rules"][0]["id"], created["id"]);
+    assert_eq!(body["rules"][0]["metric"], "CPU");
 
-    let rule_id = created["id"].as_str().expect("the rule should have an id");
+    // A rule is addressed by its identity — the service and the metric.
     let response = raw(
         &app,
         delete_with_cookie(
-            &format!("/api/v1/services/service-1/autoscaling/{rule_id}"),
+            "/api/v1/services/service-1/autoscaling/CPU",
             &session_cookie,
         ),
     )
@@ -1421,10 +1421,7 @@ async fn removing_an_unknown_rule_is_not_found() {
     let (status, body) = send(
         &app,
         delete_with_cookie(
-            &format!(
-                "/api/v1/services/service-1/autoscaling/{}",
-                uuid::Uuid::nil()
-            ),
+            "/api/v1/services/service-1/autoscaling/MEMORY",
             &session_cookie,
         ),
     )
@@ -1432,6 +1429,20 @@ async fn removing_an_unknown_rule_is_not_found() {
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
+
+    // A segment naming no metric at all is caught by the extractor, on the
+    // envelope like every other malformed path.
+    let (status, body) = send(
+        &app,
+        delete_with_cookie(
+            "/api/v1/services/service-1/autoscaling/DISK",
+            &session_cookie,
+        ),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "bad_request");
 }
 
 #[tokio::test]

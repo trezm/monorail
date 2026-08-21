@@ -6,12 +6,14 @@ import { RequestRejected, SessionExpired } from './projects';
 /** Mirrors `Metric` in `api/src/services/autoscaling.rs`. */
 export type Metric = 'CPU' | 'MEMORY' | 'NETWORK_RX' | 'NETWORK_TX';
 
-/** Mirrors `Rule` in `api/src/services/autoscaling.rs`. */
+/**
+ * Mirrors `Rule` in `api/src/services/autoscaling.rs`. A rule's identity is
+ * (service_id, metric) — there is no separate id.
+ */
 export interface Rule {
-  id: string;
   service_id: string;
-  environment_id: string;
   metric: Metric;
+  environment_id: string;
   min_threshold: number;
   max_threshold: number;
   poll_frequency_secs: number;
@@ -75,10 +77,10 @@ export async function createRule(serviceId: string, rule: NewRule): Promise<Rule
   return (await response.json()) as Rule;
 }
 
-/** Removes a rule. Removing one that is already gone is a rejection, not a success. */
-export async function removeRule(serviceId: string, ruleId: string): Promise<void> {
+/** Removes a service's rule for one metric. Removing one that is already gone is a rejection, not a success. */
+export async function removeRule(serviceId: string, metric: Metric): Promise<void> {
   const response = await fetch(
-    `${API_URL}/api/v1/services/${encodeURIComponent(serviceId)}/autoscaling/${encodeURIComponent(ruleId)}`,
+    `${API_URL}/api/v1/services/${encodeURIComponent(serviceId)}/autoscaling/${encodeURIComponent(metric)}`,
     { method: 'DELETE', credentials: 'include' },
   );
 

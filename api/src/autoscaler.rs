@@ -13,6 +13,12 @@
 //! its evaluation worked, so a service Railway cannot answer about is retried
 //! at its poll frequency rather than every tick.
 //!
+//! The loop acts on Railway with the rule owner's credential, read and
+//! renewed through the session store via
+//! [`Credentials::access_token_for_user`] — the same machinery requests use,
+//! keyed by user because the loop holds no cookie. One lookup per owner per
+//! sweep; rules sharing an owner share the token.
+//!
 //! Two shortcuts a grown-up autoscaler would replace:
 //!
 //! - Every sweep reads rules and sessions straight from Postgres. A
@@ -25,17 +31,19 @@
 //!   window already dampens, but outliers still drag it: a trimmed mean or a
 //!   percentile, or requiring N consecutive breaches, is the upgrade path.
 
-use std::{sync::Arc, time::Duration};
+use std::{collections::HashMap, sync::Arc, time::Duration};
 
 use chrono::{DateTime, TimeDelta, Utc};
+use uuid::Uuid;
 
 use crate::{
-    constants::{ACCESS_TOKEN_EXPIRY_SKEW_SECS, AUTOSCALER_METRICS_WINDOW_SECS},
+    constants::AUTOSCALER_METRICS_WINDOW_SECS,
     secret::Secret,
     services::{
-        auth::{AuthError, AuthProvider},
-        autoscaling::{AutoscaleResult, AutoscaleStore, DueRule, Rule, RuleCredentials},
+        auth::AuthProvider,
+        autoscaling::{AutoscaleResult, AutoscaleStore, Rule},
         railway::{MetricSample, RailwayApi},
+        session::{Credentials, SessionStore},
     },
 };
 
@@ -48,6 +56,7 @@ enum Direction {
 
 pub struct Autoscaler {
     rules: Arc<dyn AutoscaleStore>,
+    sessions: Arc<dyn SessionStore>,
     railway: Arc<dyn RailwayApi>,
     auth: Arc<dyn AuthProvider>,
     tick: Duration,
@@ -57,12 +66,14 @@ impl Autoscaler {
     #[must_use]
     pub fn new(
         rules: Arc<dyn AutoscaleStore>,
+        sessions: Arc<dyn SessionStore>,
         railway: Arc<dyn RailwayApi>,
         auth: Arc<dyn AuthProvider>,
         tick: Duration,
     ) -> Self {
         Self {
             rules,
+            sessions,
             railway,
             auth,
             tick,
@@ -88,30 +99,42 @@ impl Autoscaler {
     /// One pass over every due rule. Public, and taking `now`, so a test can
     /// drive it without a clock or a runtime timer.
     pub async fn sweep(&self, now: DateTime<Utc>) -> AutoscaleResult<()> {
-        for entry in self.rules.due(now).await? {
-            if let Err(error) = self.evaluate(&entry, now).await {
+        let mut tokens: HashMap<Uuid, Secret> = HashMap::new();
+
+        for rule in self.rules.due(now).await? {
+            if let Err(error) = self.evaluate(&rule, &mut tokens, now).await {
                 tracing::warn!(
-                    rule_id = %entry.rule.id,
-                    service_id = %entry.rule.service_id,
+                    service_id = %rule.service_id,
+                    metric = rule.metric.as_str(),
                     error = ?error,
                     "autoscaling rule evaluation failed",
                 );
             }
 
-            self.rules.mark_checked(entry.rule.id, now).await?;
+            self.rules
+                .mark_checked(&rule.service_id, rule.metric, now)
+                .await?;
         }
 
         Ok(())
     }
 
-    async fn evaluate(&self, entry: &DueRule, now: DateTime<Utc>) -> anyhow::Result<()> {
-        let rule = &entry.rule;
-
-        let Some(credentials) = &entry.credentials else {
-            anyhow::bail!("the rule's owner has no live session; it resumes at their next login");
+    async fn evaluate(
+        &self,
+        rule: &Rule,
+        tokens: &mut HashMap<Uuid, Secret>,
+        now: DateTime<Utc>,
+    ) -> anyhow::Result<()> {
+        let access_token = match tokens.get(&rule.user_id) {
+            Some(token) => token.clone(),
+            None => {
+                let token = Credentials::new(self.sessions.as_ref(), self.auth.as_ref())
+                    .access_token_for_user(rule.user_id)
+                    .await?;
+                tokens.insert(rule.user_id, token.clone());
+                token
+            }
         };
-
-        let access_token = self.access_token(credentials, now).await?;
 
         let window =
             TimeDelta::try_seconds(AUTOSCALER_METRICS_WINDOW_SECS).unwrap_or_else(TimeDelta::zero);
@@ -164,46 +187,6 @@ impl Autoscaler {
 
         Ok(())
     }
-
-    /// The loop's version of [`Credentials::access_token`](crate::services::session::Credentials::access_token):
-    /// the same renewal with the same skew, written back by session row rather
-    /// than by a cookie the loop never sees.
-    async fn access_token(
-        &self,
-        credentials: &RuleCredentials,
-        now: DateTime<Utc>,
-    ) -> anyhow::Result<Secret> {
-        let skew =
-            TimeDelta::try_seconds(ACCESS_TOKEN_EXPIRY_SKEW_SECS).unwrap_or_else(TimeDelta::zero);
-
-        if !credentials.tokens.is_expired_at(now + skew) {
-            return Ok(credentials.tokens.access_token.clone());
-        }
-
-        let refresh_token = credentials
-            .tokens
-            .refresh_token
-            .as_ref()
-            .ok_or_else(|| anyhow::anyhow!("the owner's session has no refresh token left"))?;
-
-        let mut renewed = match self.auth.refresh(refresh_token).await {
-            Ok(renewed) => renewed,
-            Err(AuthError::InvalidGrant) => {
-                anyhow::bail!("the owner's refresh token is no longer honoured; sign in again")
-            }
-            Err(error) => return Err(error.into()),
-        };
-
-        if renewed.refresh_token.is_none() {
-            renewed.refresh_token = credentials.tokens.refresh_token.clone();
-        }
-
-        self.rules
-            .renew_credentials(credentials.session_id, &renewed)
-            .await?;
-
-        Ok(renewed.access_token)
-    }
 }
 
 /// `None` for an empty window: no data is no decision, not a zero.
@@ -248,6 +231,7 @@ mod tests {
         auth::{AuthResult, CsrfState, Pkce, RailwayIdentity, TokenSet},
         autoscaling::{AutoscaleError, Metric, NewRule},
         railway::{Measurement, Project, RailwayResult, Service, ServiceInstance, ServiceSource},
+        session::{Session, SessionCredentials, SessionResult, SessionToken},
     };
 
     fn sample(value: f64) -> MetricSample {
@@ -256,11 +240,10 @@ mod tests {
 
     fn rule(min: f64, max: f64) -> Rule {
         Rule {
-            id: uuid::Uuid::nil(),
-            user_id: uuid::Uuid::nil(),
             service_id: "svc-1".to_owned(),
-            environment_id: "env-1".to_owned(),
             metric: Metric::Cpu,
+            user_id: uuid::Uuid::nil(),
+            environment_id: "env-1".to_owned(),
             min_threshold: min,
             max_threshold: max,
             poll_frequency_secs: 60,
@@ -298,9 +281,8 @@ mod tests {
     /// An [`AutoscaleStore`] over a vec, recording what the loop did to it.
     #[derive(Default)]
     struct MemoryRules {
-        due: Mutex<Vec<DueRule>>,
-        checked: Mutex<Vec<uuid::Uuid>>,
-        renewed: Mutex<Vec<(uuid::Uuid, String)>>,
+        due: Mutex<Vec<Rule>>,
+        checked: Mutex<Vec<(String, Metric)>>,
     }
 
     #[async_trait::async_trait]
@@ -326,29 +308,83 @@ mod tests {
             &self,
             _owner: uuid::Uuid,
             _service_id: &str,
-            _rule_id: uuid::Uuid,
+            _metric: Metric,
         ) -> Result<bool, AutoscaleError> {
             unreachable!("the loop never removes rules")
         }
 
-        async fn due(&self, _now: DateTime<Utc>) -> Result<Vec<DueRule>, AutoscaleError> {
+        async fn due(&self, _now: DateTime<Utc>) -> Result<Vec<Rule>, AutoscaleError> {
             Ok(self.due.lock().expect("lock").clone())
         }
 
         async fn mark_checked(
             &self,
-            rule_id: uuid::Uuid,
+            service_id: &str,
+            metric: Metric,
             _now: DateTime<Utc>,
         ) -> Result<(), AutoscaleError> {
-            self.checked.lock().expect("lock").push(rule_id);
+            self.checked
+                .lock()
+                .expect("lock")
+                .push((service_id.to_owned(), metric));
             Ok(())
         }
+    }
 
-        async fn renew_credentials(
+    /// A [`SessionStore`] holding one user's credentials, counting reads and
+    /// recording write-backs. Only the cookie-less half is real; the loop
+    /// never touches the rest.
+    struct OneUserSessions {
+        credentials: Option<SessionCredentials>,
+        reads: Mutex<usize>,
+        renewed: Mutex<Vec<(uuid::Uuid, String)>>,
+    }
+
+    impl OneUserSessions {
+        fn new(credentials: Option<SessionCredentials>) -> Self {
+            Self {
+                credentials,
+                reads: Mutex::new(0),
+                renewed: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl SessionStore for OneUserSessions {
+        async fn begin(
+            &self,
+            _identity: &RailwayIdentity,
+            _tokens: TokenSet,
+        ) -> SessionResult<(SessionToken, Session)> {
+            unreachable!("the loop never opens sessions")
+        }
+
+        async fn lookup(&self, _token: &SessionToken) -> SessionResult<Option<Session>> {
+            unreachable!("the loop never reads cookies")
+        }
+
+        async fn renew(&self, _token: &SessionToken, _tokens: &TokenSet) -> SessionResult<()> {
+            unreachable!("the loop never renews by cookie")
+        }
+
+        async fn end(&self, _token: &SessionToken) -> SessionResult<()> {
+            unreachable!("the loop never ends sessions")
+        }
+
+        async fn freshest_for_user(
+            &self,
+            _user_id: uuid::Uuid,
+        ) -> SessionResult<Option<SessionCredentials>> {
+            *self.reads.lock().expect("lock") += 1;
+            Ok(self.credentials.clone())
+        }
+
+        async fn renew_by_id(
             &self,
             session_id: uuid::Uuid,
             tokens: &TokenSet,
-        ) -> Result<(), AutoscaleError> {
+        ) -> SessionResult<()> {
             self.renewed
                 .lock()
                 .expect("lock")
@@ -498,23 +534,27 @@ mod tests {
         }
     }
 
-    fn tokens(expires_at: DateTime<Utc>) -> TokenSet {
-        TokenSet {
-            access_token: Secret::new("access-live"),
-            refresh_token: Some(Secret::new("refresh-ok")),
-            id_token: None,
-            scope: "openid".to_owned(),
-            expires_at,
+    fn credentials(expires_at: DateTime<Utc>) -> SessionCredentials {
+        SessionCredentials {
+            session_id: uuid::Uuid::nil(),
+            tokens: TokenSet {
+                access_token: Secret::new("access-live"),
+                refresh_token: Some(Secret::new("refresh-ok")),
+                id_token: None,
+                scope: "openid".to_owned(),
+                expires_at,
+            },
         }
     }
 
-    fn due_entry(rule: Rule, credentials: Option<RuleCredentials>) -> DueRule {
-        DueRule { rule, credentials }
-    }
-
-    fn autoscaler(rules: Arc<MemoryRules>, railway: Arc<FixedRailway>) -> Autoscaler {
+    fn autoscaler(
+        rules: Arc<MemoryRules>,
+        sessions: Arc<OneUserSessions>,
+        railway: Arc<FixedRailway>,
+    ) -> Autoscaler {
         Autoscaler::new(
             rules,
+            sessions,
             railway,
             Arc::new(RefreshOnly),
             Duration::from_secs(1),
@@ -525,16 +565,13 @@ mod tests {
     async fn a_breached_maximum_scales_up_by_one() {
         let now = Utc::now();
         let rules = Arc::new(MemoryRules::default());
-        rules.due.lock().expect("lock").push(due_entry(
-            rule(0.2, 0.8),
-            Some(RuleCredentials {
-                session_id: uuid::Uuid::nil(),
-                tokens: tokens(now + TimeDelta::hours(1)),
-            }),
-        ));
+        rules.due.lock().expect("lock").push(rule(0.2, 0.8));
+        let sessions = Arc::new(OneUserSessions::new(Some(credentials(
+            now + TimeDelta::hours(1),
+        ))));
         let railway = Arc::new(FixedRailway::new(vec![sample(0.9), sample(0.95)], 2));
 
-        autoscaler(rules.clone(), railway.clone())
+        autoscaler(rules.clone(), sessions, railway.clone())
             .sweep(now)
             .await
             .expect("the sweep should succeed");
@@ -543,23 +580,23 @@ mod tests {
             railway.scaled.lock().expect("lock").clone(),
             [("svc-1".to_owned(), "env-1".to_owned(), 3)]
         );
-        assert_eq!(rules.checked.lock().expect("lock").len(), 1);
+        assert_eq!(
+            rules.checked.lock().expect("lock").clone(),
+            [("svc-1".to_owned(), Metric::Cpu)]
+        );
     }
 
     #[tokio::test]
     async fn an_average_inside_the_band_changes_nothing() {
         let now = Utc::now();
         let rules = Arc::new(MemoryRules::default());
-        rules.due.lock().expect("lock").push(due_entry(
-            rule(0.2, 0.8),
-            Some(RuleCredentials {
-                session_id: uuid::Uuid::nil(),
-                tokens: tokens(now + TimeDelta::hours(1)),
-            }),
-        ));
+        rules.due.lock().expect("lock").push(rule(0.2, 0.8));
+        let sessions = Arc::new(OneUserSessions::new(Some(credentials(
+            now + TimeDelta::hours(1),
+        ))));
         let railway = Arc::new(FixedRailway::new(vec![sample(0.5)], 2));
 
-        autoscaler(rules.clone(), railway.clone())
+        autoscaler(rules.clone(), sessions, railway.clone())
             .sweep(now)
             .await
             .expect("the sweep should succeed");
@@ -576,16 +613,13 @@ mod tests {
     async fn one_replica_under_the_minimum_stays_one() {
         let now = Utc::now();
         let rules = Arc::new(MemoryRules::default());
-        rules.due.lock().expect("lock").push(due_entry(
-            rule(0.2, 0.8),
-            Some(RuleCredentials {
-                session_id: uuid::Uuid::nil(),
-                tokens: tokens(now + TimeDelta::hours(1)),
-            }),
-        ));
+        rules.due.lock().expect("lock").push(rule(0.2, 0.8));
+        let sessions = Arc::new(OneUserSessions::new(Some(credentials(
+            now + TimeDelta::hours(1),
+        ))));
         let railway = Arc::new(FixedRailway::new(vec![sample(0.05)], 1));
 
-        autoscaler(rules.clone(), railway.clone())
+        autoscaler(rules.clone(), sessions, railway.clone())
             .sweep(now)
             .await
             .expect("the sweep should succeed");
@@ -593,22 +627,19 @@ mod tests {
         assert!(railway.scaled.lock().expect("lock").is_empty());
     }
 
-    /// A spent access token is renewed and written back before Railway is
-    /// read, exactly as `Credentials` does for a request.
+    /// A spent access token is renewed through the session store before
+    /// Railway is read — the same `Credentials` path a request takes.
     #[tokio::test]
     async fn a_spent_token_is_renewed_before_the_metrics_are_read() {
         let now = Utc::now();
         let rules = Arc::new(MemoryRules::default());
-        rules.due.lock().expect("lock").push(due_entry(
-            rule(0.2, 0.8),
-            Some(RuleCredentials {
-                session_id: uuid::Uuid::nil(),
-                tokens: tokens(now - TimeDelta::seconds(1)),
-            }),
-        ));
+        rules.due.lock().expect("lock").push(rule(0.2, 0.8));
+        let sessions = Arc::new(OneUserSessions::new(Some(credentials(
+            now - TimeDelta::seconds(1),
+        ))));
         let railway = Arc::new(FixedRailway::new(vec![sample(0.5)], 2));
 
-        autoscaler(rules.clone(), railway.clone())
+        autoscaler(rules.clone(), sessions.clone(), railway.clone())
             .sweep(now)
             .await
             .expect("the sweep should succeed");
@@ -619,9 +650,31 @@ mod tests {
             "the spent token should never reach Railway"
         );
         assert_eq!(
-            rules.renewed.lock().expect("lock").clone(),
+            sessions.renewed.lock().expect("lock").clone(),
             [(uuid::Uuid::nil(), "access-renewed".to_owned())]
         );
+    }
+
+    /// Rules sharing an owner share one credential lookup per sweep.
+    #[tokio::test]
+    async fn one_owner_is_looked_up_once_per_sweep() {
+        let now = Utc::now();
+        let rules = Arc::new(MemoryRules::default());
+        let mut second = rule(0.2, 0.8);
+        second.service_id = "svc-2".to_owned();
+        rules.due.lock().expect("lock").push(rule(0.2, 0.8));
+        rules.due.lock().expect("lock").push(second);
+        let sessions = Arc::new(OneUserSessions::new(Some(credentials(
+            now + TimeDelta::hours(1),
+        ))));
+        let railway = Arc::new(FixedRailway::new(vec![sample(0.5)], 2));
+
+        autoscaler(rules, sessions.clone(), railway)
+            .sweep(now)
+            .await
+            .expect("the sweep should succeed");
+
+        assert_eq!(*sessions.reads.lock().expect("lock"), 1);
     }
 
     /// No live session is a skipped rule, not a failed sweep — and the check
@@ -630,14 +683,11 @@ mod tests {
     async fn a_rule_without_a_session_waits_for_a_login() {
         let now = Utc::now();
         let rules = Arc::new(MemoryRules::default());
-        rules
-            .due
-            .lock()
-            .expect("lock")
-            .push(due_entry(rule(0.2, 0.8), None));
+        rules.due.lock().expect("lock").push(rule(0.2, 0.8));
+        let sessions = Arc::new(OneUserSessions::new(None));
         let railway = Arc::new(FixedRailway::new(vec![sample(0.9)], 2));
 
-        autoscaler(rules.clone(), railway.clone())
+        autoscaler(rules.clone(), sessions, railway.clone())
             .sweep(now)
             .await
             .expect("the sweep should succeed");
