@@ -378,6 +378,59 @@ p {
   color: color-mix(in srgb, var(--accent) 80%, var(--foreground));
 }
 
+.project__refresh {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 1.7rem;
+  height: 1.7rem;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: 0.5rem;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+  transition:
+    border-color 150ms ease-out,
+    color 150ms ease-out;
+}
+
+.project__refresh:hover {
+  border-color: var(--border-strong);
+  color: var(--foreground);
+}
+
+.project__refresh:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 1px;
+}
+
+.project__refresh:disabled {
+  cursor: default;
+  color: var(--muted);
+}
+
+.project__refresh-icon {
+  width: 0.85rem;
+  height: 0.85rem;
+}
+
+.project__refresh--busy .project__refresh-icon {
+  animation: spin 800ms linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.project__refresh-error {
+  margin: 0.4rem 0.25rem 0;
+  font-size: 0.8rem;
+  color: var(--danger);
+}
+
 .project[open] > :not(summary) {
   animation: reveal 200ms ease-out both;
 }
@@ -973,6 +1026,7 @@ p {
 
 @media (prefers-reduced-motion: reduce) {
   .project__chevron,
+  .project__refresh,
   .login-button,
   .new-service__submit,
   .autoscaling__submit {
@@ -980,6 +1034,7 @@ p {
   }
 
   .project[open] > :not(summary),
+  .project__refresh--busy .project__refresh-icon,
   .skeleton::after,
   .status-pill--busy::before {
     animation: none;
