@@ -270,12 +270,13 @@ the cost is a wasted call rather than a broken session.
 
 ## Autoscaling
 
-`POST /api/v1/services/{id}/autoscaling` creates a horizontal autoscaling rule
-for a service: a metric (`CPU`, `MEMORY`, `NETWORK_RX`, `NETWORK_TX`), a
-min/max threshold band in the metric's unit (vCPU cores, or gigabytes), a poll
-frequency, and the environment to scale in. A rule's identity is the (service,
-metric) pair — that is the table's primary key — so `GET` lists the caller's
-and `DELETE .../{metric}` removes one.
+`POST /api/v1/services/{id}/autoscaling` creates the horizontal autoscaling
+rule for a service: a metric (`CPU`, `MEMORY`, `NETWORK_RX`, `NETWORK_TX`), a
+min/max threshold band in the metric's unit (vCPU cores, or gigabytes), a
+min/max replica count the loop may steer between, a poll frequency, and the
+environment to scale in. A service takes exactly one rule — two rules steering
+the same replica count could fight — so `service_id` is the primary key and
+the same path serves `GET` and `DELETE`.
 
 [`src/services/autoscaling.rs`](src/services/autoscaling.rs) is the store —
 `AutoscaleStore` the capability, `PgAutoscaleStore` the implementation — and
@@ -283,9 +284,12 @@ and `DELETE .../{metric}` removes one.
 tick (`API_AUTOSCALER_TICK_SECS`) it takes the rules whose poll frequency has
 elapsed, averages the metric over the last five minutes via Railway's
 `metrics` query, and moves the replica count by one when the average leaves
-the band — never below one replica. Replica changes go out as
-`serviceInstanceUpdate` plus `serviceInstanceDeployV2`, because Railway stages
-instance updates until a deploy applies them.
+the threshold band, clamped into the rule's replica band. The clamp is
+authoritative — a count moved outside the band by hand comes back inside it —
+and the migration keeps `min_count >= 1`, so a rule can never stop a service.
+Replica changes go out as `serviceInstanceUpdate` plus
+`serviceInstanceDeployV2`, because Railway stages instance updates until a
+deploy applies them.
 
 The loop authenticates as the rule's owner through the session store:
 `Credentials::access_token_for_user` reads their freshest live session and

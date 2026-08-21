@@ -23,7 +23,7 @@ use monorail_api::{
     routes::auth::{PENDING_COOKIE, SESSION_COOKIE},
     services::{
         auth::{AuthError, AuthProvider, AuthResult, CsrfState, Pkce, RailwayIdentity, TokenSet},
-        autoscaling::{AutoscaleError, AutoscaleResult, AutoscaleStore, Metric, NewRule, Rule},
+        autoscaling::{AutoscaleError, AutoscaleResult, AutoscaleStore, NewRule, Rule},
         railway::{
             Deployment, Environment as RailwayEnvironment, Measurement, MetricSample, Project,
             RailwayApi, RailwayError, RailwayResult, Service, ServiceInstance, ServiceSource,
@@ -577,7 +577,7 @@ impl AutoscaleStore for MemoryAutoscale {
 
         if rules
             .iter()
-            .any(|existing| existing.service_id == service_id && existing.metric == rule.metric)
+            .any(|existing| existing.service_id == service_id)
         {
             return Err(AutoscaleError::Duplicate);
         }
@@ -589,6 +589,8 @@ impl AutoscaleStore for MemoryAutoscale {
             environment_id: rule.environment_id,
             min_threshold: rule.min_threshold,
             max_threshold: rule.max_threshold,
+            min_count: rule.min_count,
+            max_count: rule.max_count,
             poll_frequency_secs: rule.poll_frequency_secs,
             last_checked: None,
             created_at: Utc::now(),
@@ -611,13 +613,11 @@ impl AutoscaleStore for MemoryAutoscale {
             .collect())
     }
 
-    async fn remove(&self, owner: Uuid, service_id: &str, metric: Metric) -> AutoscaleResult<bool> {
+    async fn remove(&self, owner: Uuid, service_id: &str) -> AutoscaleResult<bool> {
         let mut rules = self.rules.lock().expect("lock");
         let before = rules.len();
 
-        rules.retain(|rule| {
-            !(rule.service_id == service_id && rule.metric == metric && rule.user_id == owner)
-        });
+        rules.retain(|rule| !(rule.service_id == service_id && rule.user_id == owner));
 
         Ok(rules.len() < before)
     }
@@ -626,12 +626,7 @@ impl AutoscaleStore for MemoryAutoscale {
         unreachable!("no route test runs the autoscaling loop")
     }
 
-    async fn mark_checked(
-        &self,
-        _service_id: &str,
-        _metric: Metric,
-        _now: DateTime<Utc>,
-    ) -> AutoscaleResult<()> {
+    async fn mark_checked(&self, _service_id: &str, _now: DateTime<Utc>) -> AutoscaleResult<()> {
         unreachable!("no route test runs the autoscaling loop")
     }
 }
@@ -1216,6 +1211,8 @@ fn rule_body() -> Value {
         "metric": "CPU",
         "min_threshold": 0.2,
         "max_threshold": 0.8,
+        "min_count": 1,
+        "max_count": 5,
         "poll_frequency_secs": 60,
     })
 }
@@ -1255,6 +1252,8 @@ async fn an_autoscaling_rule_round_trips() {
     assert_eq!(created["environment_id"], "env-1");
     assert_eq!(created["min_threshold"], 0.2);
     assert_eq!(created["max_threshold"], 0.8);
+    assert_eq!(created["min_count"], 1);
+    assert_eq!(created["max_count"], 5);
     assert_eq!(created["poll_frequency_secs"], 60);
     assert!(created["last_checked"].is_null());
     assert!(
@@ -1270,13 +1269,10 @@ async fn an_autoscaling_rule_round_trips() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["rules"][0]["metric"], "CPU");
 
-    // A rule is addressed by its identity — the service and the metric.
+    // A service has at most one rule, so the collection path is its address.
     let response = raw(
         &app,
-        delete_with_cookie(
-            "/api/v1/services/service-1/autoscaling/CPU",
-            &session_cookie,
-        ),
+        delete_with_cookie("/api/v1/services/service-1/autoscaling", &session_cookie),
     )
     .await;
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
@@ -1334,8 +1330,10 @@ async fn a_logged_in_browser_spins_a_service_down() {
     );
 }
 
+/// One rule per service: even a rule watching a different metric conflicts,
+/// because two rules steering the same replica count could fight.
 #[tokio::test]
-async fn a_second_rule_for_the_same_metric_is_a_conflict() {
+async fn a_second_rule_for_the_same_service_is_a_conflict() {
     let (app, _, _) = app_with_railway();
     let session_cookie = log_in(&app).await;
 
@@ -1350,12 +1348,14 @@ async fn a_second_rule_for_the_same_metric_is_a_conflict() {
     .await;
     assert_eq!(status, StatusCode::CREATED);
 
+    let mut other_metric = rule_body();
+    other_metric["metric"] = serde_json::json!("MEMORY");
     let (status, body) = send(
         &app,
         post_json(
             "/api/v1/services/service-1/autoscaling",
             Some(&session_cookie),
-            &rule_body(),
+            &other_metric,
         ),
     )
     .await;
@@ -1411,6 +1411,38 @@ async fn an_unusable_rule_is_rejected_with_the_reason() {
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
     assert_eq!(body["error"]["code"], "unprocessable_entity");
+
+    let mut stoppable = rule_body();
+    stoppable["min_count"] = serde_json::json!(0);
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &stoppable,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(body["error"]["message"], "min_count must be at least 1");
+
+    let mut inverted_counts = rule_body();
+    inverted_counts["min_count"] = serde_json::json!(4);
+    inverted_counts["max_count"] = serde_json::json!(2);
+    let (status, body) = send(
+        &app,
+        post_json(
+            "/api/v1/services/service-1/autoscaling",
+            Some(&session_cookie),
+            &inverted_counts,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(
+        body["error"]["message"],
+        "max_count must be at least min_count"
+    );
 }
 
 #[tokio::test]
@@ -1420,29 +1452,12 @@ async fn removing_an_unknown_rule_is_not_found() {
 
     let (status, body) = send(
         &app,
-        delete_with_cookie(
-            "/api/v1/services/service-1/autoscaling/MEMORY",
-            &session_cookie,
-        ),
+        delete_with_cookie("/api/v1/services/service-1/autoscaling", &session_cookie),
     )
     .await;
 
     assert_eq!(status, StatusCode::NOT_FOUND);
     assert_eq!(body["error"]["code"], "not_found");
-
-    // A segment naming no metric at all is caught by the extractor, on the
-    // envelope like every other malformed path.
-    let (status, body) = send(
-        &app,
-        delete_with_cookie(
-            "/api/v1/services/service-1/autoscaling/DISK",
-            &session_cookie,
-        ),
-    )
-    .await;
-
-    assert_eq!(status, StatusCode::BAD_REQUEST);
-    assert_eq!(body["error"]["code"], "bad_request");
 }
 
 #[tokio::test]

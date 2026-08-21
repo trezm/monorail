@@ -1,10 +1,11 @@
 //! Horizontal autoscaling rules, and their Postgres store.
 //!
 //! A rule is local state about a Railway resource: which metric to watch on
-//! one service, the band the average should stay inside, and how often to
-//! look. Its identity is (service, metric) — two rules reading the same
-//! signal could only agree or fight, so that pair is the primary key. The
-//! loop that acts on rules is [`crate::autoscaler`]; this module is the
+//! one service, the band the average should stay inside, the replica counts
+//! the loop may steer between, and how often to look. Its identity is the
+//! service alone — two rules steering the same replica count could only agree
+//! or fight, so a service takes one rule and `service_id` is the primary key.
+//! The loop that acts on rules is [`crate::autoscaler`]; this module is the
 //! storage capability both it and the HTTP layer depend on, behind a trait
 //! for the same reason [`SessionStore`](super::session::SessionStore) is.
 //!
@@ -36,9 +37,9 @@ pub type AutoscaleResult<T> = Result<T, AutoscaleError>;
 
 #[derive(Debug, thiserror::Error)]
 pub enum AutoscaleError {
-    /// The service already has a rule for this metric — the primary key,
-    /// surfaced as a conflict the caller resolves by removing the old rule.
-    #[error("this service already has a rule for that metric")]
+    /// The service already has a rule — the primary key, surfaced as a
+    /// conflict the caller resolves by removing the old rule.
+    #[error("this service already has an autoscaling rule")]
     Duplicate,
 
     #[error(transparent)]
@@ -146,6 +147,8 @@ pub struct Rule {
     pub environment_id: String,
     pub min_threshold: f64,
     pub max_threshold: f64,
+    pub min_count: i32,
+    pub max_count: i32,
     pub poll_frequency_secs: i32,
     pub last_checked: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
@@ -159,6 +162,8 @@ pub struct NewRule {
     pub metric: Metric,
     pub min_threshold: f64,
     pub max_threshold: f64,
+    pub min_count: i32,
+    pub max_count: i32,
     pub poll_frequency_secs: i32,
 }
 
@@ -168,28 +173,23 @@ pub struct NewRule {
 /// so detaching the loop into its own service takes the store with it intact.
 #[async_trait::async_trait]
 pub trait AutoscaleStore: Send + Sync + 'static {
-    /// [`AutoscaleError::Duplicate`] when the service already has a rule for
-    /// the metric.
+    /// [`AutoscaleError::Duplicate`] when the service already has a rule.
     async fn create(&self, owner: Uuid, service_id: &str, rule: NewRule) -> AutoscaleResult<Rule>;
 
-    /// The owner's rules for one service, oldest first.
+    /// The owner's rule for one service — a list on the wire so nothing
+    /// reshapes if a service ever takes more than one again.
     async fn list(&self, owner: Uuid, service_id: &str) -> AutoscaleResult<Vec<Rule>>;
 
     /// `false` when nothing was removed — no such rule, or a rule that is not
     /// the owner's to remove.
-    async fn remove(&self, owner: Uuid, service_id: &str, metric: Metric) -> AutoscaleResult<bool>;
+    async fn remove(&self, owner: Uuid, service_id: &str) -> AutoscaleResult<bool>;
 
     /// Every rule due at `now`: never checked, or checked longer ago than its
     /// poll frequency.
     async fn due(&self, now: DateTime<Utc>) -> AutoscaleResult<Vec<Rule>>;
 
     /// Stamps a rule as checked, due again one poll frequency from `now`.
-    async fn mark_checked(
-        &self,
-        service_id: &str,
-        metric: Metric,
-        now: DateTime<Utc>,
-    ) -> AutoscaleResult<()>;
+    async fn mark_checked(&self, service_id: &str, now: DateTime<Utc>) -> AutoscaleResult<()>;
 }
 
 /// [`AutoscaleStore`] over the application's Postgres pool.
@@ -218,6 +218,8 @@ impl AutoscaleStore for PgAutoscaleStore {
                 horizontal_autoscaling::metric.eq(rule.metric),
                 horizontal_autoscaling::min_threshold.eq(rule.min_threshold),
                 horizontal_autoscaling::max_threshold.eq(rule.max_threshold),
+                horizontal_autoscaling::min_count.eq(rule.min_count),
+                horizontal_autoscaling::max_count.eq(rule.max_count),
                 horizontal_autoscaling::poll_frequency_secs.eq(rule.poll_frequency_secs),
             ))
             .returning(Rule::as_returning())
@@ -237,13 +239,12 @@ impl AutoscaleStore for PgAutoscaleStore {
             .await?)
     }
 
-    async fn remove(&self, owner: Uuid, service_id: &str, metric: Metric) -> AutoscaleResult<bool> {
+    async fn remove(&self, owner: Uuid, service_id: &str) -> AutoscaleResult<bool> {
         let mut conn = self.database.conn().await?;
 
         let removed = diesel::delete(
             horizontal_autoscaling::table
                 .filter(horizontal_autoscaling::service_id.eq(service_id))
-                .filter(horizontal_autoscaling::metric.eq(metric))
                 .filter(horizontal_autoscaling::user_id.eq(owner)),
         )
         .execute(&mut conn)
@@ -274,18 +275,11 @@ impl AutoscaleStore for PgAutoscaleStore {
             .await?)
     }
 
-    async fn mark_checked(
-        &self,
-        service_id: &str,
-        metric: Metric,
-        now: DateTime<Utc>,
-    ) -> AutoscaleResult<()> {
+    async fn mark_checked(&self, service_id: &str, now: DateTime<Utc>) -> AutoscaleResult<()> {
         let mut conn = self.database.conn().await?;
 
         diesel::update(
-            horizontal_autoscaling::table
-                .filter(horizontal_autoscaling::service_id.eq(service_id))
-                .filter(horizontal_autoscaling::metric.eq(metric)),
+            horizontal_autoscaling::table.filter(horizontal_autoscaling::service_id.eq(service_id)),
         )
         .set((
             horizontal_autoscaling::last_checked.eq(now),
@@ -377,22 +371,28 @@ mod tests {
         let owner = session.user.id;
         let service_id = format!("svc_{}", crate::secret::random_token());
 
-        let new_rule = || NewRule {
+        let new_rule = |metric| NewRule {
             environment_id: "env-1".to_owned(),
-            metric: Metric::Cpu,
+            metric,
             min_threshold: 0.1,
             max_threshold: 0.8,
+            min_count: 1,
+            max_count: 5,
             poll_frequency_secs: 3600,
         };
 
         let rule = store
-            .create(owner, &service_id, new_rule())
+            .create(owner, &service_id, new_rule(Metric::Cpu))
             .await
             .expect("a rule should be created");
         assert_eq!(rule.metric, Metric::Cpu);
+        assert_eq!((rule.min_count, rule.max_count), (1, 5));
         assert_eq!(rule.last_checked, None);
 
-        let duplicate = store.create(owner, &service_id, new_rule()).await;
+        // One rule per service: a second is a conflict even on another metric.
+        let duplicate = store
+            .create(owner, &service_id, new_rule(Metric::Memory))
+            .await;
         assert!(matches!(duplicate, Err(AutoscaleError::Duplicate)));
 
         let listed = store
@@ -410,7 +410,7 @@ mod tests {
         );
 
         store
-            .mark_checked(&service_id, Metric::Cpu, now)
+            .mark_checked(&service_id, now)
             .await
             .expect("the stamp should write");
         let due = store.due(now).await.expect("the sweep should read");
@@ -421,13 +421,13 @@ mod tests {
 
         assert!(
             store
-                .remove(owner, &service_id, Metric::Cpu)
+                .remove(owner, &service_id)
                 .await
                 .expect("removal should succeed")
         );
         assert!(
             !store
-                .remove(owner, &service_id, Metric::Cpu)
+                .remove(owner, &service_id)
                 .await
                 .expect("a second removal should succeed"),
             "removing an absent rule should report nothing removed"

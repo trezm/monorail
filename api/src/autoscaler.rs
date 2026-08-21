@@ -8,10 +8,12 @@
 //! Each sweep reads the rules whose poll frequency has elapsed, averages the
 //! rule's metric over the last [`METRICS_WINDOW`](crate::constants::AUTOSCALER_METRICS_WINDOW_SECS)
 //! seconds of samples, and moves the service's replica count by one — up when
-//! the average exceeds the rule's maximum, down when it sits under the
-//! minimum, never below one replica. A rule is stamped checked whether or not
-//! its evaluation worked, so a service Railway cannot answer about is retried
-//! at its poll frequency rather than every tick.
+//! the average exceeds the rule's maximum threshold, down when it sits under
+//! the minimum — clamped into the rule's `[min_count, max_count]` band. The
+//! clamp is authoritative: a count already outside the band is brought back
+//! inside it the next time the metric asks for a move. A rule is stamped
+//! checked whether or not its evaluation worked, so a service Railway cannot
+//! answer about is retried at its poll frequency rather than every tick.
 //!
 //! The loop acts on Railway with the rule owner's credential, read and
 //! renewed through the session store via
@@ -111,9 +113,7 @@ impl Autoscaler {
                 );
             }
 
-            self.rules
-                .mark_checked(&rule.service_id, rule.metric, now)
-                .await?;
+            self.rules.mark_checked(&rule.service_id, now).await?;
         }
 
         Ok(())
@@ -160,7 +160,7 @@ impl Autoscaler {
             .service_instance(&access_token, &rule.service_id, &rule.environment_id)
             .await?;
         let current = instance.num_replicas.unwrap_or(1);
-        let target = next_replicas(current, direction);
+        let target = next_replicas(current, direction, rule);
 
         if target == current {
             return Ok(());
@@ -211,13 +211,18 @@ fn decide(average: f64, rule: &Rule) -> Option<Direction> {
     }
 }
 
-/// One step at a time, never below one replica — zero is a stopped service,
-/// which is an outage this loop must not be able to cause.
-fn next_replicas(current: i64, direction: Direction) -> i64 {
-    match direction {
+/// One step at a time, clamped into the rule's replica band. The clamp wins
+/// over the step: a count outside `[min_count, max_count]` — the bounds were
+/// tightened, or someone scaled by hand — comes back inside it. The migration
+/// keeps `min_count >= 1`, so zero replicas — a stopped service — stays
+/// unreachable from here.
+fn next_replicas(current: i64, direction: Direction, rule: &Rule) -> i64 {
+    let step = match direction {
         Direction::Up => current.saturating_add(1),
-        Direction::Down => (current - 1).max(1),
-    }
+        Direction::Down => current.saturating_sub(1),
+    };
+
+    step.clamp(i64::from(rule.min_count), i64::from(rule.max_count))
 }
 
 #[cfg(test)]
@@ -246,6 +251,8 @@ mod tests {
             environment_id: "env-1".to_owned(),
             min_threshold: min,
             max_threshold: max,
+            min_count: 1,
+            max_count: 4,
             poll_frequency_secs: 60,
             last_checked: None,
             created_at: Utc::now(),
@@ -272,17 +279,38 @@ mod tests {
     }
 
     #[test]
-    fn scaling_down_stops_at_one_replica() {
-        assert_eq!(next_replicas(3, Direction::Up), 4);
-        assert_eq!(next_replicas(3, Direction::Down), 2);
-        assert_eq!(next_replicas(1, Direction::Down), 1);
+    fn a_step_stays_inside_the_replica_band() {
+        let rule = rule(0.2, 0.8);
+
+        assert_eq!(next_replicas(3, Direction::Up, &rule), 4);
+        assert_eq!(next_replicas(3, Direction::Down, &rule), 2);
+        assert_eq!(
+            next_replicas(4, Direction::Up, &rule),
+            4,
+            "capped at max_count"
+        );
+        assert_eq!(
+            next_replicas(1, Direction::Down, &rule),
+            1,
+            "floored at min_count"
+        );
+    }
+
+    /// The clamp is authoritative: a count someone moved outside the band by
+    /// hand is brought back inside it, not stepped further out.
+    #[test]
+    fn a_count_outside_the_band_is_pulled_back_in() {
+        let rule = rule(0.2, 0.8);
+
+        assert_eq!(next_replicas(9, Direction::Up, &rule), 4);
+        assert_eq!(next_replicas(0, Direction::Down, &rule), 1);
     }
 
     /// An [`AutoscaleStore`] over a vec, recording what the loop did to it.
     #[derive(Default)]
     struct MemoryRules {
         due: Mutex<Vec<Rule>>,
-        checked: Mutex<Vec<(String, Metric)>>,
+        checked: Mutex<Vec<String>>,
     }
 
     #[async_trait::async_trait]
@@ -308,7 +336,6 @@ mod tests {
             &self,
             _owner: uuid::Uuid,
             _service_id: &str,
-            _metric: Metric,
         ) -> Result<bool, AutoscaleError> {
             unreachable!("the loop never removes rules")
         }
@@ -320,13 +347,12 @@ mod tests {
         async fn mark_checked(
             &self,
             service_id: &str,
-            metric: Metric,
             _now: DateTime<Utc>,
         ) -> Result<(), AutoscaleError> {
             self.checked
                 .lock()
                 .expect("lock")
-                .push((service_id.to_owned(), metric));
+                .push(service_id.to_owned());
             Ok(())
         }
     }
@@ -582,7 +608,7 @@ mod tests {
         );
         assert_eq!(
             rules.checked.lock().expect("lock").clone(),
-            [("svc-1".to_owned(), Metric::Cpu)]
+            ["svc-1".to_owned()]
         );
     }
 
@@ -625,6 +651,27 @@ mod tests {
             .expect("the sweep should succeed");
 
         assert!(railway.scaled.lock().expect("lock").is_empty());
+    }
+
+    /// A breached maximum at `max_count` replicas asks Railway for nothing:
+    /// the clamp makes the target equal the current count.
+    #[tokio::test]
+    async fn a_service_at_max_count_is_not_scaled_further() {
+        let now = Utc::now();
+        let rules = Arc::new(MemoryRules::default());
+        rules.due.lock().expect("lock").push(rule(0.2, 0.8));
+        let sessions = Arc::new(OneUserSessions::new(Some(credentials(
+            now + TimeDelta::hours(1),
+        ))));
+        let railway = Arc::new(FixedRailway::new(vec![sample(0.95)], 4));
+
+        autoscaler(rules.clone(), sessions, railway.clone())
+            .sweep(now)
+            .await
+            .expect("the sweep should succeed");
+
+        assert!(railway.scaled.lock().expect("lock").is_empty());
+        assert_eq!(rules.checked.lock().expect("lock").len(), 1);
     }
 
     /// A spent access token is renewed through the session store before

@@ -7,8 +7,9 @@ import { RequestRejected, SessionExpired } from './projects';
 export type Metric = 'CPU' | 'MEMORY' | 'NETWORK_RX' | 'NETWORK_TX';
 
 /**
- * Mirrors `Rule` in `api/src/services/autoscaling.rs`. A rule's identity is
- * (service_id, metric) — there is no separate id.
+ * Mirrors `Rule` in `api/src/services/autoscaling.rs`. A service takes one
+ * rule, so its identity is the service alone. The thresholds bound the
+ * metric; min_count/max_count bound the replica count the loop may steer to.
  */
 export interface Rule {
   service_id: string;
@@ -16,6 +17,8 @@ export interface Rule {
   environment_id: string;
   min_threshold: number;
   max_threshold: number;
+  min_count: number;
+  max_count: number;
   poll_frequency_secs: number;
   last_checked: string | null;
   created_at: string;
@@ -28,10 +31,12 @@ export interface NewRule {
   metric: Metric;
   min_threshold: number;
   max_threshold: number;
+  min_count: number;
+  max_count: number;
   poll_frequency_secs: number;
 }
 
-/** The rules watching one service, oldest first. */
+/** The service's rule, as a list of at most one. */
 export async function rules(serviceId: string): Promise<Rule[]> {
   const response = await fetch(
     `${API_URL}/api/v1/services/${encodeURIComponent(serviceId)}/autoscaling`,
@@ -52,8 +57,8 @@ export async function rules(serviceId: string): Promise<Rule[]> {
 }
 
 /**
- * Adds a rule to a service. A service takes one rule per metric; a second is
- * declined with the envelope's message, which is worth showing.
+ * Adds a rule to a service. A service takes one rule; a second is declined
+ * with the envelope's message, which is worth showing.
  */
 export async function createRule(serviceId: string, rule: NewRule): Promise<Rule> {
   const response = await fetch(
@@ -77,10 +82,10 @@ export async function createRule(serviceId: string, rule: NewRule): Promise<Rule
   return (await response.json()) as Rule;
 }
 
-/** Removes a service's rule for one metric. Removing one that is already gone is a rejection, not a success. */
-export async function removeRule(serviceId: string, metric: Metric): Promise<void> {
+/** Removes the service's rule. Removing one that is already gone is a rejection, not a success. */
+export async function removeRule(serviceId: string): Promise<void> {
   const response = await fetch(
-    `${API_URL}/api/v1/services/${encodeURIComponent(serviceId)}/autoscaling/${encodeURIComponent(metric)}`,
+    `${API_URL}/api/v1/services/${encodeURIComponent(serviceId)}/autoscaling`,
     { method: 'DELETE', credentials: 'include' },
   );
 

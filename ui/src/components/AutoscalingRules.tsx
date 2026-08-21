@@ -19,12 +19,10 @@ const METRICS: Record<Metric, { label: string; unit: string }> = {
 };
 
 /**
- * One service's autoscaling rules: the ones it has, and a form to add one.
- *
- * Rules are unique per service and metric, so the list is short by
- * construction. A new rule watches the environment currently picked in the
- * dropdown above — the rule remembers it, since scaling acts on a service *in*
- * an environment.
+ * One service's autoscaling rule: the one it has, or a form to add one — a
+ * service takes a single rule, so the form and the rule never show together.
+ * A new rule watches the environment currently picked in the dropdown above —
+ * the rule remembers it, since scaling acts on a service *in* an environment.
  */
 export default function AutoscalingRules({
   serviceId,
@@ -61,12 +59,12 @@ export default function AutoscalingRules({
     };
   }, [serviceId, session]);
 
-  const remove = (rule: Rule) => {
+  const remove = () => {
     setError(null);
 
-    removeRule(serviceId, rule.metric)
+    removeRule(serviceId)
       .then(() => {
-        setLoaded((current) => current?.filter((kept) => kept.metric !== rule.metric) ?? current);
+        setLoaded([]);
       })
       .catch((cause: unknown) => {
         if (cause instanceof SessionExpired) {
@@ -93,18 +91,19 @@ export default function AutoscalingRules({
     <div className="autoscaling">
       <h3 className="autoscaling__heading">Autoscaling</h3>
 
-      {loaded.length > 0 && (
+      {loaded.length > 0 ? (
         <ul className="autoscaling__rules">
           {loaded.map((rule) => (
-            <li key={rule.metric} className="autoscaling__rule">
+            <li key={rule.service_id} className="autoscaling__rule">
               <span className="autoscaling__summary">
                 {METRICS[rule.metric].label}: {rule.min_threshold}–{rule.max_threshold}{' '}
-                {METRICS[rule.metric].unit} · every {rule.poll_frequency_secs}s
+                {METRICS[rule.metric].unit} · {rule.min_count}–{rule.max_count} replicas · every{' '}
+                {rule.poll_frequency_secs}s
               </span>
               <button
                 type="button"
                 className="autoscaling__remove"
-                onClick={() => remove(rule)}
+                onClick={remove}
                 aria-label={`Remove the ${METRICS[rule.metric].label} rule`}
               >
                 Remove
@@ -112,13 +111,13 @@ export default function AutoscalingRules({
             </li>
           ))}
         </ul>
+      ) : (
+        <NewRuleForm
+          serviceId={serviceId}
+          environmentId={environmentId}
+          onCreated={(rule) => setLoaded([rule])}
+        />
       )}
-
-      <NewRuleForm
-        serviceId={serviceId}
-        environmentId={environmentId}
-        onCreated={(rule) => setLoaded((current) => [...(current ?? []), rule])}
-      />
 
       {error && (
         <p className="notice notice--error autoscaling__error" role="alert">
@@ -147,6 +146,8 @@ function NewRuleForm({
   const [metric, setMetric] = useState<Metric>('CPU');
   const [min, setMin] = useState('');
   const [max, setMax] = useState('');
+  const [minCount, setMinCount] = useState('1');
+  const [maxCount, setMaxCount] = useState('');
   const [poll, setPoll] = useState('300');
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -154,6 +155,8 @@ function NewRuleForm({
   const parsed = {
     min: Number.parseFloat(min),
     max: Number.parseFloat(max),
+    minCount: Number.parseInt(minCount, 10),
+    maxCount: Number.parseInt(maxCount, 10),
     poll: Number.parseInt(poll, 10),
   };
   const ready =
@@ -161,6 +164,10 @@ function NewRuleForm({
     Number.isFinite(parsed.max) &&
     parsed.min >= 0 &&
     parsed.max > parsed.min &&
+    Number.isInteger(parsed.minCount) &&
+    parsed.minCount >= 1 &&
+    Number.isInteger(parsed.maxCount) &&
+    parsed.maxCount >= parsed.minCount &&
     Number.isInteger(parsed.poll) &&
     parsed.poll > 0;
 
@@ -176,11 +183,14 @@ function NewRuleForm({
       metric,
       min_threshold: parsed.min,
       max_threshold: parsed.max,
+      min_count: parsed.minCount,
+      max_count: parsed.maxCount,
       poll_frequency_secs: parsed.poll,
     })
       .then((rule) => {
         setMin('');
         setMax('');
+        setMaxCount('');
         onCreated(rule);
       })
       .catch((cause: unknown) => {
@@ -238,6 +248,32 @@ function NewRuleForm({
         placeholder={`max ${METRICS[metric].unit}`}
         value={max}
         onChange={(event) => setMax(event.currentTarget.value)}
+        disabled={busy}
+      />
+
+      <label className="visually-hidden" htmlFor={`${id}-min-count`}>
+        Minimum replica count
+      </label>
+      <input
+        id={`${id}-min-count`}
+        className="autoscaling__input"
+        inputMode="numeric"
+        placeholder="min replicas"
+        value={minCount}
+        onChange={(event) => setMinCount(event.currentTarget.value)}
+        disabled={busy}
+      />
+
+      <label className="visually-hidden" htmlFor={`${id}-max-count`}>
+        Maximum replica count
+      </label>
+      <input
+        id={`${id}-max-count`}
+        className="autoscaling__input"
+        inputMode="numeric"
+        placeholder="max replicas"
+        value={maxCount}
+        onChange={(event) => setMaxCount(event.currentTarget.value)}
         disabled={busy}
       />
 

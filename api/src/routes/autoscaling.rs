@@ -1,27 +1,20 @@
 //! A service's horizontal autoscaling rules.
 
-use axum::{
-    Router,
-    extract::State,
-    http::StatusCode,
-    routing::{delete, get},
-};
+use axum::{Router, extract::State, http::StatusCode, routing::get};
 use serde::Serialize;
 
 use crate::{
     error::{ApiError, ApiResult},
     extract::{CurrentUser, Json, Path},
-    services::autoscaling::{Metric, NewRule, Rule},
+    services::autoscaling::{NewRule, Rule},
     state::AppState,
 };
 
 pub fn router() -> Router<AppState> {
-    Router::new()
-        .route("/services/{service_id}/autoscaling", get(list).post(create))
-        .route(
-            "/services/{service_id}/autoscaling/{metric}",
-            delete(remove),
-        )
+    Router::new().route(
+        "/services/{service_id}/autoscaling",
+        get(list).post(create).delete(remove),
+    )
 }
 
 /// An object rather than a bare array, for the same reason `ProjectList` is.
@@ -71,6 +64,18 @@ async fn create(
             "max_threshold must be greater than min_threshold".to_owned(),
         ));
     }
+    // One replica is the floor, not zero: a rule must never be able to stop
+    // the service it scales.
+    if body.min_count < 1 {
+        return Err(ApiError::UnprocessableEntity(
+            "min_count must be at least 1".to_owned(),
+        ));
+    }
+    if body.max_count < body.min_count {
+        return Err(ApiError::UnprocessableEntity(
+            "max_count must be at least min_count".to_owned(),
+        ));
+    }
 
     let rule = state
         .autoscaling()
@@ -80,22 +85,20 @@ async fn create(
     Ok((StatusCode::CREATED, Json(rule)))
 }
 
-/// A rule is addressed by what it is — the service and the metric it watches
-/// — because that pair is its identity. `404` for an absent rule and for
-/// another account's alike — this endpoint does not confirm other people's
-/// rules exist.
+/// A service has at most one rule, so the collection path is also the rule's
+/// address. `404` for an absent rule and for another account's alike — this
+/// endpoint does not confirm other people's rules exist.
 async fn remove(
     State(state): State<AppState>,
-    Path((service_id, metric)): Path<(String, Metric)>,
+    Path(service_id): Path<String>,
     CurrentUser(user): CurrentUser,
 ) -> ApiResult<StatusCode> {
-    if state
-        .autoscaling()
-        .remove(user.id, &service_id, metric)
-        .await?
-    {
+    if state.autoscaling().remove(user.id, &service_id).await? {
         Ok(StatusCode::NO_CONTENT)
     } else {
-        Err(ApiError::not_found("autoscaling rule", metric.as_str()))
+        Err(ApiError::not_found(
+            "autoscaling rule for service",
+            service_id,
+        ))
     }
 }
