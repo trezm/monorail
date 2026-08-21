@@ -10,6 +10,6 @@ FROM debian:trixie-slim
 WORKDIR /app
 COPY --from=build /src/target/release/api /src/target/release/migrate ./
 USER nobody
-# One replica, so migrate-then-serve cannot race. Move migrate to a
-# pre-deploy command before scaling replicas up.
-CMD ["/bin/sh", "-c", "./migrate && exec ./api"]
+# Migrations run as the pre-deploy command (see railway.json), one job per
+# deploy, so replicas never race them at startup.
+CMD ["./api"]
