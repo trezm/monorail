@@ -524,8 +524,8 @@ impl RailwayApi for StubRailway {
         Ok(())
     }
 
-    /// `env-empty` mirrors `service_instance`; `service-running` is one with
-    /// nothing removed to bring back.
+    /// `env-empty` mirrors `service_instance`; `service-running` is one still
+    /// running, which spin-up refuses to replace.
     async fn spin_up(
         &self,
         access_token: &Secret,

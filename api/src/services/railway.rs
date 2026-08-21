@@ -236,11 +236,11 @@ pub trait RailwayApi: Send + Sync + 'static {
         replicas: i64,
     ) -> RailwayResult<()>;
 
-    /// Spins a service down in one environment by removing its latest
-    /// deployment. The service and its configuration survive; only the
-    /// running thing goes away. [`RailwayError::NotFound`] when the service
-    /// has no instance there, [`RailwayError::Rejected`] when nothing is
-    /// running to remove.
+    /// Spins a service down in one environment by stopping its latest
+    /// deployment, which stays in Railway's history as `REMOVED`. The service
+    /// and its configuration survive; only the running thing goes away.
+    /// [`RailwayError::NotFound`] when the service has no instance there,
+    /// [`RailwayError::Rejected`] when nothing is running to stop.
     async fn spin_down(
         &self,
         access_token: &Secret,
@@ -248,10 +248,12 @@ pub trait RailwayApi: Send + Sync + 'static {
         environment_id: &str,
     ) -> RailwayResult<()>;
 
-    /// Spins a service back up in one environment by redeploying what a
-    /// spin-down removed, returning the fresh deployment as Railway records
-    /// it. [`RailwayError::NotFound`] when the service has no instance there,
-    /// [`RailwayError::Rejected`] when it is not spun down.
+    /// Spins a service back up in one environment by deploying its configured
+    /// source afresh, returning the new deployment as Railway records it. No
+    /// deployment at all counts as spun down — an earlier spin-down may have
+    /// left no history behind. [`RailwayError::NotFound`] when the service
+    /// has no instance there, [`RailwayError::Rejected`] when something is
+    /// already running.
     async fn spin_up(
         &self,
         access_token: &Secret,
@@ -339,19 +341,34 @@ mutation ServiceCreate($input: ServiceCreateInput!) {
 }
 ";
 
-/// Spinning down is Railway's own "Remove" on a deployment: the instance and
-/// its configuration stay, and spinning back up brings it back.
-const DEPLOYMENT_REMOVE_MUTATION: &str = r"
-mutation DeploymentRemove($id: String!) {
-  deploymentRemove(id: $id)
+/// Spinning down is Railway's own "Remove" on the running deployment, which
+/// the public API names `deploymentStop`: the containers stop and the
+/// deployment stays in history as `REMOVED`. Not `deploymentRemove` — that
+/// deletes the deployment from history, leaving nothing to show a spin-down
+/// ever happened.
+const DEPLOYMENT_STOP_MUTATION: &str = r"
+mutation DeploymentStop($id: String!) {
+  deploymentStop(id: $id)
 }
 ";
 
-/// Spinning back up is Railway's own "Redeploy" on the removed deployment:
-/// the same build comes back, rather than a fresh one from source.
-const DEPLOYMENT_REDEPLOY_MUTATION: &str = r"
-mutation DeploymentRedeploy($id: String!) {
-  deploymentRedeploy(id: $id) {
+/// Spinning back up deploys the service's configured source afresh. Railway
+/// refuses `deploymentRedeploy` on anything `REMOVED`, so a stopped
+/// deployment cannot itself come back; this is the same "deploy" the
+/// dashboard offers, and it also recovers a service with no deployment
+/// history at all. Returns only the new deployment's id.
+const SERVICE_INSTANCE_DEPLOY_MUTATION: &str = r"
+mutation SpinUp($serviceId: String!, $environmentId: String!) {
+  serviceInstanceDeployV2(serviceId: $serviceId, environmentId: $environmentId)
+}
+";
+
+/// Reads back the deployment `serviceInstanceDeployV2` created, since the
+/// mutation answers with an id and callers are promised the deployment as
+/// Railway records it.
+const DEPLOYMENT_QUERY: &str = r"
+query Deployment($id: String!) {
+  deployment(id: $id) {
     id
     status
     createdAt
@@ -523,18 +540,7 @@ impl RailwayApi for RailwayGraphQl {
         let envelope: GraphQlResponse<ServiceInstanceQuery> =
             self.post(access_token, &body, "service instance").await?;
 
-        // Asking about a service with no instance in the environment is an
-        // error entry with a `200`, not a null — and a `404`'s worth of error,
-        // not an unhealthy provider.
-        let data = envelope.into_data(|messages| {
-            if is_missing_resource(&messages) {
-                RailwayError::NotFound(messages)
-            } else {
-                query_rejected("service instance")(messages)
-            }
-        })?;
-
-        Ok(data.service_instance.into_instance())
+        instance_from(envelope)
     }
 
     async fn service_metrics(
@@ -598,7 +604,7 @@ impl RailwayApi for RailwayGraphQl {
             .service_instance(access_token, service_id, environment_id)
             .await?;
 
-        // The latest deployment is what gets removed — unless the service has
+        // The latest deployment is what gets stopped — unless the service has
         // nothing running, which is the caller's situation to hear about, not
         // a provider fault.
         let deployment = match instance.latest_deployment {
@@ -620,28 +626,25 @@ impl RailwayApi for RailwayGraphQl {
         };
 
         let body = serde_json::json!({
-            "query": DEPLOYMENT_REMOVE_MUTATION,
+            "query": DEPLOYMENT_STOP_MUTATION,
             "variables": { "id": deployment.id },
         });
 
-        let envelope: GraphQlResponse<DeploymentRemoveMutation> =
-            self.post(access_token, &body, "deployment removal").await?;
+        let envelope: GraphQlResponse<DeploymentStopMutation> =
+            self.post(access_token, &body, "deployment stop").await?;
 
-        if envelope
-            .into_data(RailwayError::Rejected)?
-            .deployment_remove
-        {
+        if envelope.into_data(RailwayError::Rejected)?.deployment_stop {
             Ok(())
         } else {
             Err(RailwayError::Provider(anyhow::anyhow!(
-                "Railway answered the deployment removal with a refusal it did not explain"
+                "Railway answered the deployment stop with a refusal it did not explain"
             )))
         }
     }
 
-    /// Reads the instance first for the same reason `spin_down` does: the
-    /// mutation wants a deployment id, callers think in services and
-    /// environments.
+    /// Reads the instance first to refuse replacing something already
+    /// running; the deploy itself needs no deployment id, which is what lets
+    /// spin-up work when a spin-down left no history behind.
     async fn spin_up(
         &self,
         access_token: &Secret,
@@ -652,33 +655,39 @@ impl RailwayApi for RailwayGraphQl {
             .service_instance(access_token, service_id, environment_id)
             .await?;
 
-        // Only a removed deployment can come back; anything else is either
-        // still up or never existed, and both are the caller's news.
-        let deployment = match instance.latest_deployment {
-            Some(deployment) if deployment.status == "REMOVED" => deployment,
-            Some(_) => {
-                return Err(RailwayError::Rejected(
-                    "the service is not spun down in this environment".to_owned(),
-                ));
-            }
-            None => {
-                return Err(RailwayError::Rejected(
-                    "the service has never been deployed in this environment".to_owned(),
-                ));
-            }
-        };
+        if instance
+            .latest_deployment
+            .is_some_and(|deployment| deployment.status != "REMOVED")
+        {
+            return Err(RailwayError::Rejected(
+                "the service is not spun down in this environment".to_owned(),
+            ));
+        }
 
         let body = serde_json::json!({
-            "query": DEPLOYMENT_REDEPLOY_MUTATION,
-            "variables": { "id": deployment.id },
+            "query": SERVICE_INSTANCE_DEPLOY_MUTATION,
+            "variables": {
+                "serviceId": service_id,
+                "environmentId": environment_id,
+            },
         });
 
-        let envelope: GraphQlResponse<DeploymentRedeployMutation> =
-            self.post(access_token, &body, "redeploy").await?;
+        let envelope: GraphQlResponse<ServiceInstanceDeployMutation> =
+            self.post(access_token, &body, "deploy").await?;
 
-        let node = envelope
+        let deployment_id = envelope
             .into_data(RailwayError::Rejected)?
-            .deployment_redeploy;
+            .service_instance_deploy_v2;
+
+        let body = serde_json::json!({
+            "query": DEPLOYMENT_QUERY,
+            "variables": { "id": deployment_id },
+        });
+
+        let envelope: GraphQlResponse<DeploymentQuery> =
+            self.post(access_token, &body, "deployment").await?;
+
+        let node = envelope.into_data(query_rejected("deployment"))?.deployment;
 
         Ok(Deployment {
             id: node.id,
@@ -708,28 +717,67 @@ impl<T> GraphQlResponse<T> {
     /// `reject` decides what a non-authorization error becomes: a failed query
     /// is the provider's problem, a declined mutation is the caller's.
     fn into_data(self, reject: impl FnOnce(String) -> RailwayError) -> RailwayResult<T> {
-        if !self.errors.is_empty() {
-            let messages: Vec<_> = self
-                .errors
-                .iter()
-                .map(|error| error.message.as_str())
-                .collect();
-
-            // GraphQL reports an unusable credential in the body with a `200`,
-            // so the status code alone does not catch it.
-            if messages
-                .iter()
-                .any(|message| is_authorization_failure(message))
-            {
-                return Err(RailwayError::TokenRejected);
-            }
-
-            return Err(reject(messages.join("; ")));
+        if let Some(error) = classify_errors(&self.errors, reject) {
+            return Err(error);
         }
 
         self.data
             .ok_or_else(|| RailwayError::Provider(anyhow::anyhow!("Railway returned no data")))
     }
+}
+
+/// The error half of [`GraphQlResponse::into_data`], on its own for the one
+/// caller that accepts partial data. `None` when there are no error entries.
+fn classify_errors(
+    errors: &[GraphQlError],
+    reject: impl FnOnce(String) -> RailwayError,
+) -> Option<RailwayError> {
+    if errors.is_empty() {
+        return None;
+    }
+
+    let messages: Vec<_> = errors.iter().map(|error| error.message.as_str()).collect();
+
+    // GraphQL reports an unusable credential in the body with a `200`, so the
+    // status code alone does not catch it.
+    if messages
+        .iter()
+        .any(|message| is_authorization_failure(message))
+    {
+        return Some(RailwayError::TokenRejected);
+    }
+
+    Some(reject(messages.join("; ")))
+}
+
+/// The instance out of its envelope, tolerating the shapes Railway answers
+/// with around a spin-down. A partial result still describes the instance:
+/// Railway nulls a field it could not resolve — a deployment mid-removal —
+/// and files an error entry beside the data, not instead of it. A null
+/// instance, explained or not, is the caller's `404` rather than an unhealthy
+/// provider.
+fn instance_from(
+    envelope: GraphQlResponse<ServiceInstanceQuery>,
+) -> RailwayResult<ServiceInstance> {
+    let GraphQlResponse { data, errors } = envelope;
+
+    if let Some(ServiceInstanceQuery {
+        service_instance: Some(node),
+    }) = data
+    {
+        return Ok(node.into_instance());
+    }
+
+    Err(classify_errors(&errors, |messages| {
+        if is_missing_resource(&messages) {
+            RailwayError::NotFound(messages)
+        } else {
+            query_rejected("service instance")(messages)
+        }
+    })
+    .unwrap_or_else(|| {
+        RailwayError::NotFound("the service has no instance in this environment".to_owned())
+    }))
 }
 
 /// The [`GraphQlResponse::into_data`] rejection for a read: a query Railway
@@ -845,14 +893,19 @@ struct ServiceCreateMutation {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeploymentRemoveMutation {
-    deployment_remove: bool,
+struct DeploymentStopMutation {
+    deployment_stop: bool,
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct DeploymentRedeployMutation {
-    deployment_redeploy: DeploymentNode,
+struct ServiceInstanceDeployMutation {
+    service_instance_deploy_v2: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct DeploymentQuery {
+    deployment: DeploymentNode,
 }
 
 #[derive(Debug, Deserialize)]
@@ -889,10 +942,14 @@ struct EnvironmentNode {
     created_at: Option<DateTime<Utc>>,
 }
 
+/// `service_instance` is optional because Railway can answer `null` for it —
+/// notably while a deployment is being torn down — and a missing instance is
+/// a `404`, not a body that fails to parse.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ServiceInstanceQuery {
-    service_instance: ServiceInstanceNode,
+    #[serde(default)]
+    service_instance: Option<ServiceInstanceNode>,
 }
 
 /// Every field beyond `id` defaults rather than fails: the dashboard losing
@@ -996,16 +1053,7 @@ mod tests {
     }
 
     fn parse_instance(body: &str) -> RailwayResult<ServiceInstance> {
-        serde_json::from_str::<GraphQlResponse<ServiceInstanceQuery>>(body)
-            .expect("body should parse")
-            .into_data(|messages| {
-                if is_missing_resource(&messages) {
-                    RailwayError::NotFound(messages)
-                } else {
-                    query_rejected("service instance")(messages)
-                }
-            })
-            .map(|query| query.service_instance.into_instance())
+        instance_from(serde_json::from_str(body).expect("body should parse"))
     }
 
     #[test]
@@ -1185,8 +1233,8 @@ mod tests {
     }
 
     #[test]
-    fn a_declined_removal_carries_railways_message() {
-        let error = serde_json::from_str::<GraphQlResponse<DeploymentRemoveMutation>>(
+    fn a_declined_stop_carries_railways_message() {
+        let error = serde_json::from_str::<GraphQlResponse<DeploymentStopMutation>>(
             r#"{"data":null,"errors":[{"message":"Deployment not found"}]}"#,
         )
         .expect("body should parse")
@@ -1199,14 +1247,27 @@ mod tests {
     }
 
     #[test]
-    fn a_redeploy_carries_the_fresh_deployment() {
-        let node = serde_json::from_str::<GraphQlResponse<DeploymentRedeployMutation>>(
-            r#"{"data":{"deploymentRedeploy":{"id":"d2","status":"BUILDING","createdAt":null}}}"#,
+    fn a_spin_up_answers_with_the_fresh_deployments_id() {
+        let id = serde_json::from_str::<GraphQlResponse<ServiceInstanceDeployMutation>>(
+            r#"{"data":{"serviceInstanceDeployV2":"d2"}}"#,
         )
         .expect("body should parse")
         .into_data(RailwayError::Rejected)
         .expect("should succeed")
-        .deployment_redeploy;
+        .service_instance_deploy_v2;
+
+        assert_eq!(id, "d2");
+    }
+
+    #[test]
+    fn the_fresh_deployment_reads_back_by_id() {
+        let node = serde_json::from_str::<GraphQlResponse<DeploymentQuery>>(
+            r#"{"data":{"deployment":{"id":"d2","status":"BUILDING","createdAt":null}}}"#,
+        )
+        .expect("body should parse")
+        .into_data(query_rejected("deployment"))
+        .expect("should succeed")
+        .deployment;
 
         assert_eq!(node.id, "d2");
         assert_eq!(node.status, "BUILDING");
@@ -1221,5 +1282,31 @@ mod tests {
                 .expect_err("should fail");
 
         assert!(matches!(error, RailwayError::NotFound(_)));
+    }
+
+    /// Railway can answer a bare `null` for the instance — mid-removal,
+    /// notably — and that is a `404`, not a body that fails to parse into a
+    /// `503`.
+    #[test]
+    fn a_null_instance_is_not_found() {
+        let error =
+            parse_instance(r#"{"data":{"serviceInstance":null}}"#).expect_err("should fail");
+
+        assert!(matches!(error, RailwayError::NotFound(_)));
+    }
+
+    /// An error entry beside usable data is a partial result, not a failure:
+    /// the field Railway could not resolve is null, and the rest of the
+    /// instance is still worth having.
+    #[test]
+    fn a_partial_instance_survives_its_error_entries() {
+        let instance = parse_instance(
+            r#"{"data":{"serviceInstance":{"id":"i1","latestDeployment":null}},
+                "errors":[{"message":"Cannot return null for non-nullable field Deployment.status"}]}"#,
+        )
+        .expect("should parse");
+
+        assert_eq!(instance.id, "i1");
+        assert_eq!(instance.latest_deployment, None);
     }
 }

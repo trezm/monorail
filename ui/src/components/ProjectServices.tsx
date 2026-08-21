@@ -192,20 +192,24 @@ function canSpinDown(state: InstanceState): boolean {
   return deployment !== null && deployment.status !== 'REMOVED' && deployment.status !== 'REMOVING';
 }
 
-/** Only a removed deployment can come back. Disjoint from `canSpinDown`. */
+/**
+ * Anything with nothing running can come up: a removed deployment, or no
+ * deployment at all — spin-up deploys the service's source afresh either way.
+ * Disjoint from `canSpinDown`; a deployment mid-removal gets neither button.
+ */
 function canSpinUp(state: InstanceState): boolean {
-  return (
-    state.status === 'loaded' &&
-    state.instance !== null &&
-    state.instance.latest_deployment?.status === 'REMOVED'
-  );
+  if (state.status !== 'loaded' || state.instance === null) return false;
+
+  const deployment = state.instance.latest_deployment;
+
+  return deployment === null || deployment.status === 'REMOVED';
 }
 
 /**
- * Redeploys what a spin-down removed. No arming step: bringing a service back
- * is not the direction a stray click needs guarding against. Keyed by
- * environment in the parent, and success reports up for the same reasons as
- * `SpinDown`.
+ * Deploys the service's source afresh — the way back from a spin-down. No
+ * arming step: bringing a service back is not the direction a stray click
+ * needs guarding against. Keyed by environment in the parent, and success
+ * reports up for the same reasons as `SpinDown`.
  */
 function SpinUp({
   serviceId,

@@ -46,10 +46,11 @@ async fn instance(
     Ok(Json(instance))
 }
 
-/// Removes the service's latest deployment in that environment — a spin-down,
-/// not a delete: the service and its configuration stay. `204` because removal
-/// leaves nothing to describe; the UI refetches the instance for the
-/// deployment's new state.
+/// Stops the service's latest deployment in that environment — a spin-down,
+/// not a delete: the deployment stays in Railway's history as `REMOVED`, and
+/// the service and its configuration stay. `204` because stopping leaves
+/// nothing to describe; the UI refetches the instance for the deployment's
+/// new state.
 async fn spin_down(
     State(state): State<AppState>,
     Path(service_id): Path<String>,
@@ -65,9 +66,9 @@ async fn spin_down(
     Ok(StatusCode::NO_CONTENT)
 }
 
-/// Redeploys what a spin-down removed — the inverse of `spin_down`, but `201`
-/// where that is `204`: this creates a deployment, and the fresh one comes
-/// back as Railway records it.
+/// Deploys the service's source afresh in that environment — the way back
+/// from a spin-down, but `201` where that is `204`: this creates a
+/// deployment, and the fresh one comes back as Railway records it.
 async fn spin_up(
     State(state): State<AppState>,
     Path(service_id): Path<String>,
